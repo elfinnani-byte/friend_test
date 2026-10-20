@@ -1,0 +1,41 @@
+{"id": "T01", "message": "오늘 회사에서 팀장님한테 혼났어", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T02", "message": "너는 무슨 커피 좋아해?", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T03", "message": "비 오는 날 좋아해?", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "날씨 단어가 있지만 취향 질문"}
+{"id": "T04", "message": "주말에 뭐 하면 좋을까", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T05", "message": "요즘 잠이 잘 안 와", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T06", "message": "지난 공휴일에 가족이랑 캠핑 갔었어", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "공휴일 단어가 있지만 지난 이야기"}
+{"id": "T07", "message": "우산 잃어버렸어 ㅠㅠ", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "날씨 단어가 있지만 하소연"}
+{"id": "T08", "message": "너 AI야?", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T09", "message": "고양이 키우는 거 어때?", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T10", "message": "미세먼지 때문에 비염이 심해졌어", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "애매: 예보를 원하는 게 아니라 증상 이야기"}
+{"id": "T11", "message": "오늘 점심에 뭐 먹지?", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일상 대화"}
+{"id": "T12", "message": "내 이름 기억해?", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "기억으로 답할 일, 도구 아님"}
+{"id": "T13", "message": "내일 날씨 어때?", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 1, "location": "서울"}}, "note": ""}
+{"id": "T14", "message": "오늘 부산 비 와?", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 0, "location": "부산"}}, "note": ""}
+{"id": "T15", "message": "모레 제주 여행 가는데 날씨 괜찮을까", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 2, "location": "제주"}}, "note": ""}
+{"id": "T16", "message": "지금 밖에 추워?", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 0}}, "note": ""}
+{"id": "T17", "message": "내일 출근할 때 우산 챙겨야 해?", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 1}}, "note": ""}
+{"id": "T18", "message": "이번 주 토요일 강릉 날씨 알려 줘", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 5, "location": "강릉"}}, "note": "요일을 날짜로 계산"}
+{"id": "T19", "message": "그럼 모레는?", "history": [{"role": "user", "content": "내일 날씨 어때?"}, {"role": "assistant", "content": "내일 서울은 비 소식이 있어. 우산 챙기는 게 좋겠어!"}], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 2}}, "note": "이어지는 질문"}
+{"id": "T20", "message": "내일 뭐 입고 나가지? 쌀쌀할까", "history": [], "expected_tools": ["get_weather"], "optional_tools": [], "expected_args": {"get_weather": {"day": 1}}, "note": "옷차림 질문"}
+{"id": "T21", "message": "오늘 미세먼지 어때?", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": [], "expected_args": {"get_air_quality": {"day": 0}}, "note": ""}
+{"id": "T22", "message": "내일 대구 초미세먼지 나빠?", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": [], "expected_args": {"get_air_quality": {"day": 1, "location": "대구"}}, "note": ""}
+{"id": "T23", "message": "지금 창문 열어서 환기해도 될까", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": [], "expected_args": {"get_air_quality": {"day": 0}}, "note": ""}
+{"id": "T24", "message": "내일 한강에서 러닝하려는데 공기 괜찮아?", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": ["get_weather"], "expected_args": {"get_air_quality": {"day": 1}}, "note": "날씨를 함께 골라도 정답"}
+{"id": "T25", "message": "오늘 마스크 써야 할까?", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": [], "expected_args": {"get_air_quality": {"day": 0}}, "note": ""}
+{"id": "T26", "message": "다음 공휴일 언제야?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T27", "message": "올해 남은 빨간 날 알려 줘", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T28", "message": "12월에 연휴 있어?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {"get_holidays": {"from": "2026-12-01", "to": "2026-12-31"}}, "note": ""}
+{"id": "T29", "message": "내년 설날 연휴가 언제야?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T30", "message": "내일 아침 8시에 물 마시라고 알려 줘", "history": [], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-13T08:00"}}, "note": ""}
+{"id": "T31", "message": "30분 뒤에 빨래 꺼내라고 알려줘", "history": [], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-12T14:30"}}, "note": "상대 시각"}
+{"id": "T32", "message": "목요일 저녁 7시에 엄마한테 전화하라고 리마인드 해 줘", "history": [], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-15T19:00"}}, "note": "요일 계산"}
+{"id": "T33", "message": "다음 주 월요일 아침에 보고서 제출 잊지 않게 말해 줘", "history": [], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-19T08:00"}}, "note": "다음 주 요일"}
+{"id": "T34", "message": "금요일 시험 전날 밤에 일찍 자라고 알려 줘", "history": [], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-15T21:00"}}, "note": "전날 계산"}
+{"id": "T35", "message": "3시간 뒤에 약 먹으라고 알려 줘", "history": [], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-12T17:00"}}, "note": "상대 시각"}
+{"id": "T36", "message": "내가 부탁한 알림 뭐 있었지?", "history": [], "expected_tools": ["list_reminders"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T37", "message": "이번 주 약속 목록 보여 줘", "history": [], "expected_tools": ["list_reminders"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T38", "message": "엄마한테 전화하는 알림 취소해 줘", "history": [], "expected_tools": ["cancel_reminder"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T39", "message": "내일 날씨랑 미세먼지 둘 다 알려 줘", "history": [], "expected_tools": ["get_weather", "get_air_quality"], "optional_tools": [], "expected_args": {"get_weather": {"day": 1}, "get_air_quality": {"day": 1}}, "note": "도구 두 개"}
+{"id": "T40", "message": "그럼 내일 아침 7시에 우산 챙기라고 알려 줘", "history": [{"role": "user", "content": "내일 아침에 비 와?"}, {"role": "assistant", "content": "응, 내일 아침에 비 소식이 있어."}], "expected_tools": ["create_reminder"], "optional_tools": [], "expected_args": {"create_reminder": {"due_at": "2026-10-13T07:00"}}, "note": "이어지는 요청"}
+{"id": "T41", "message": "이번 주 금요일에 자격증 시험 있어", "history": [], "expected_tools": [], "optional_tools": [], "expected_args": {}, "note": "일정 이야기는 기억할 일이지 약속 저장이 아님"}

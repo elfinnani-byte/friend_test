@@ -1,0 +1,57 @@
+# Actions 안에서 Dockerfile로 이미지를 만들고, 커밋 번호를 태그로 붙여 Artifact Registry에 올린 뒤 그 이미지로 배포한다.
+# 사용법: deploy-envs.yml 의 deploy 작업을 이 파일의 내용으로 바꾼다(테스트, 환경, 승인 구조는 그대로).
+#   저장소 공통 Variables 에 AR_REPO(예: us-central1-docker.pkg.dev/<프로젝트 ID>/friend-agent) 를 추가한다.
+#   배포용 서비스 계정에 Artifact Registry 저장소 하나에 대한 쓰기 권한(roles/artifactregistry.writer)을 추가한다(docs/wif-setup.md 5단계).
+# 배포용 이미지는 여기서만 만든다. 노트북에서 만든 이미지는 CPU 종류가 다를 수 있고, 누가 언제 만들었는지 기록이 남지 않는다.
+name: deploy
+
+on:
+  push:
+    branches: [staging, main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      IMAGE: ${{ vars.AR_REPO }}/friend-agent:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: 이미지 만들기와 올리기
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
+
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ vars.SERVICE }}
+          region: us-central1
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          image: ${{ env.IMAGE }}
+          env_vars: |
+            COMMIT_SHA=${{ github.sha }}
+            ENV=${{ vars.ENV }}
+          flags: --service-account=${{ vars.RUNTIME_SA }}
+
+      - name: 배포 결과
+        run: |
+          echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
+          echo "배포한 이미지 $IMAGE"

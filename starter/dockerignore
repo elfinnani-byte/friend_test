@@ -1,0 +1,16 @@
+# 이 파일을 저장소 루트에 .dockerignore 로 복사해 쓴다. 이미지에 넣지 않을 파일 목록이다.
+.env
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/
+docs/
+hello/
+scripts/
+starter/
+supabase/
+tests/
+data/eval/
+data/samples/

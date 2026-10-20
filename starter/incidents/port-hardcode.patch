@@ -1,0 +1,7 @@
+diff --git a/Procfile b/Procfile
+index 4b32c3e..05703ff 100644
+--- a/Procfile
++++ b/Procfile
+@@ -1 +1 @@
+-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT
++web: uvicorn app.main:app --host 0.0.0.0 --port 8000

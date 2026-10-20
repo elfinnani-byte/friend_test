@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>하루친구</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+:root{
+  --bg:#f5f3ef; --surface:#ffffff; --surface-2:#faf9f7; --line:#e8e4dd; --line-2:#d9d3c9;
+  --ink:#22201d; --ink-2:#5d5850; --ink-3:#8f887d;
+  --accent:#f7585c; --accent-ink:#ffffff; --accent-soft:#feeceb;
+  --mine:#2b2a28; --mine-ink:#ffffff; --theirs:#ffffff;
+  --ok:#2f8f5b; --ok-soft:#e7f4ec; --warn:#b26a00; --warn-soft:#fdf2df; --info:#3b6fd1; --info-soft:#e9f0fc;
+  --dev:#1f2430; --dev-2:#2a3040; --dev-ink:#d8dde8; --dev-mute:#8a93a6; --dev-line:#363d4f;
+  --radius:16px; --shadow:0 1px 2px rgba(30,25,20,.06),0 8px 24px rgba(30,25,20,.06);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Pretendard Variable",Pretendard,-apple-system,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer}
+.banner{background:#ffe08a;color:#5a4300;text-align:center;font-weight:700;font-size:13px;padding:6px}
+
+.app{display:grid;grid-template-columns:264px minmax(0,1fr) 360px;height:100vh;height:100dvh}
+.app.no-panel{grid-template-columns:264px minmax(0,1fr)}
+body.has-banner .app{height:calc(100dvh - 32px)}
+
+/* 왼쪽: 캐릭터와 메뉴 */
+.side{background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:20px 16px;gap:18px;min-height:0}
+.brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:17px;letter-spacing:-.01em}
+.brand i{width:10px;height:10px;border-radius:50%;background:var(--accent);display:inline-block}
+.who{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius);padding:16px;text-align:center}
+.who .ava{width:72px;height:72px;margin:0 auto 8px;font-size:40px;display:grid;place-items:center;background:#fff;border:1px solid var(--line);border-radius:50%}
+.who .name{font-weight:800;font-size:18px}
+.who .sub{color:var(--ink-3);font-size:13px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:10px}
+.chip{font-size:12px;padding:3px 9px;border-radius:999px;background:#fff;border:1px solid var(--line);color:var(--ink-2)}
+.nav{display:flex;flex-direction:column;gap:4px}
+.nav button{display:flex;align-items:center;gap:10px;text-align:left;border:0;background:transparent;padding:10px 12px;border-radius:12px;color:var(--ink-2);font-weight:600}
+.nav button:hover{background:var(--surface-2)}
+.nav button.on{background:var(--accent-soft);color:#c23a3e}
+.nav .count{margin-left:auto;font-size:12px;color:var(--ink-3);font-weight:500}
+.account{margin-top:auto;border-top:1px solid var(--line);padding-top:14px;font-size:13px;color:var(--ink-2);display:flex;flex-direction:column;gap:8px}
+.account .id{display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ink-3);display:inline-block}
+.dot.on{background:var(--ok)}
+.btn{border:1px solid var(--line-2);background:#fff;border-radius:10px;padding:8px 12px;font-weight:600;font-size:14px}
+.btn:hover{background:var(--surface-2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(.96)}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--ink-3);padding:4px 0;text-align:left}
+.btn.ghost:hover{color:#c23a3e}
+.btn.google{display:flex;align-items:center;justify-content:center;gap:8px}
+
+/* 가운데 */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.topbar{display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.7);backdrop-filter:blur(8px)}
+.topbar .ava{font-size:24px;width:40px;height:40px;display:grid;place-items:center;background:#fff;border:1px solid var(--line);border-radius:50%}
+.topbar .t{font-weight:800}
+.topbar .s{font-size:12px;color:var(--ink-3)}
+.ai-badge{margin-left:auto;font-size:12px;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
+.menu-btn,.panel-btn{display:none;border:1px solid var(--line);background:#fff;border-radius:10px;padding:6px 10px;font-size:13px;font-weight:600}
+
+.chat{flex:1;overflow-y:auto;padding:24px 24px 8px}
+.thread{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.row{display:flex;gap:10px;align-items:flex-end}
+.row.me{justify-content:flex-end}
+.row .ava{font-size:20px;width:34px;height:34px;flex:none;display:grid;place-items:center;background:#fff;border:1px solid var(--line);border-radius:50%}
+.bubble{max-width:min(560px,78%);padding:11px 15px;border-radius:18px;white-space:pre-wrap;word-break:break-word}
+.row.them .bubble{background:var(--theirs);border:1px solid var(--line);border-bottom-left-radius:6px;box-shadow:var(--shadow)}
+.row.me .bubble{background:var(--mine);color:var(--mine-ink);border-bottom-right-radius:6px}
+.bubble.safety{background:var(--warn-soft);border-color:#f2d7a6}
+.bubble .cursor{display:inline-block;width:7px;height:15px;background:var(--ink-3);vertical-align:-2px;margin-left:2px;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.under{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0 44px}
+.note{font-size:12.5px;padding:4px 10px;border-radius:999px;display:inline-flex;align-items:center;gap:6px}
+.note.rem{background:var(--info-soft);color:var(--info)}
+.note.mem{background:var(--ok-soft);color:var(--ok)}
+.note.busy{color:var(--ink-3)}
+.report{font-size:12px;color:var(--ink-3);background:none;border:0;padding:2px 4px;opacity:0;transition:opacity .15s}
+.row.them:hover .report{opacity:1}
+.day{align-self:center;font-size:12px;color:var(--ink-3);background:var(--surface-2);border:1px solid var(--line);padding:2px 10px;border-radius:999px}
+
+.composer{padding:10px 24px 18px}
+.composer-in{max-width:720px;margin:0 auto}
+.suggest{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none}
+.suggest button{flex:none;border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 12px;font-size:13px;color:var(--ink-2)}
+.suggest button:hover{border-color:var(--accent);color:#c23a3e}
+.box{display:flex;gap:8px;align-items:flex-end;background:#fff;border:1px solid var(--line-2);border-radius:18px;padding:8px 8px 8px 16px;box-shadow:var(--shadow)}
+.box:focus-within{border-color:var(--ink-3)}
+.box textarea{flex:1;border:0;outline:0;resize:none;max-height:140px;padding:6px 0;background:transparent}
+.send{border:0;background:var(--accent);color:#fff;width:40px;height:40px;border-radius:12px;font-size:18px;font-weight:700;flex:none}
+.send:disabled{background:var(--line-2)}
+.photo{border:0;background:var(--surface-2);width:40px;height:40px;border-radius:12px;font-size:18px;flex:none;margin-left:-8px}
+.photo:hover{background:var(--accent-soft)}
+
+/* 설정, 기억 화면 */
+.page{flex:1;overflow-y:auto;padding:28px 24px}
+.page-in{max-width:720px;margin:0 auto}
+.page h2{margin:0 0 4px;font-size:22px;letter-spacing:-.02em}
+.page .lead{color:var(--ink-2);margin:0 0 20px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.card h3{margin:0 0 14px;font-size:15px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field.full{grid-column:1/-1}
+.field label{font-size:13px;font-weight:700;color:var(--ink-2)}
+.field .hint{font-size:12px;color:var(--ink-3)}
+.input{border:1px solid var(--line-2);border-radius:10px;padding:9px 12px;background:#fff;width:100%}
+.input:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+textarea.input{min-height:80px;resize:vertical}
+.seg{display:flex;flex-wrap:wrap;gap:6px}
+.seg button{border:1px solid var(--line-2);background:#fff;border-radius:999px;padding:6px 12px;font-size:13.5px}
+.seg button.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.avatars{display:flex;gap:8px;flex-wrap:wrap}
+.avatars button{font-size:26px;width:48px;height:48px;border-radius:14px;border:1px solid var(--line-2);background:#fff}
+.avatars button.on{border:2px solid var(--accent);background:var(--accent-soft)}
+.tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center;border:1px solid var(--line-2);border-radius:10px;padding:6px 8px;background:#fff}
+.tags span{font-size:13px;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;display:inline-flex;align-items:center;gap:2px}
+.tags span button{border:0;background:none;color:var(--ink-3);padding:0 4px}
+.tags input{border:0;outline:0;flex:1;min-width:120px;padding:3px}
+.actions{display:flex;gap:8px;justify-content:flex-end;align-items:center}
+.saved{font-size:13px;color:var(--ok)}
+.list{display:flex;flex-direction:column}
+.item{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.item:first-child{border-top:0}
+.item .k{font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);color:var(--ink-2);flex:none}
+.item .x{margin-left:auto;border:0;background:none;color:var(--ink-3);font-size:13px}
+.item .x:hover{color:#c23a3e}
+.item.done{color:var(--ink-3)}
+.empty{color:var(--ink-3);font-size:14px;padding:6px 0}
+.danger{border-color:#f3c9c9}
+
+/* 오른쪽: 개발용 패널 */
+.panel{background:var(--dev);color:var(--dev-ink);display:flex;flex-direction:column;min-height:0;font-size:13.5px}
+.panel-head{padding:16px 18px 12px;border-bottom:1px solid var(--dev-line)}
+.panel-head .t{font-weight:800;color:#fff;display:flex;align-items:center;gap:8px}
+.panel-head .tag{font-size:11px;font-weight:700;color:#ffd27a;border:1px solid #6b5a2c;border-radius:6px;padding:1px 6px}
+.panel-head .s{color:var(--dev-mute);font-size:12px;margin-top:4px}
+.panel-body{flex:1;overflow-y:auto;padding:14px 18px 24px;display:flex;flex-direction:column;gap:12px}
+.step{background:var(--dev-2);border:1px solid var(--dev-line);border-radius:12px;padding:12px 14px}
+.step h4{margin:0 0 8px;font-size:12px;color:var(--dev-mute);font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:.02em}
+.step h4 b{width:18px;height:18px;border-radius:50%;background:#3a4256;color:#fff;display:grid;place-items:center;font-size:11px}
+.step h4 .by{margin-left:auto;font-size:11px;padding:1px 6px;border-radius:6px;background:#3a4256;color:#cfd6e4}
+.tchips{display:flex;flex-wrap:wrap;gap:6px}
+.tchip{background:#33405e;color:#e3eaff;border-radius:8px;padding:3px 9px;font-weight:700;font-size:12.5px}
+.tchip.none{background:#3a3f4b;color:#aab2c3}
+.conf{margin-top:10px}
+.conf .bar{position:relative;height:8px;background:#3a4256;border-radius:99px;overflow:visible}
+.conf .fill{height:100%;border-radius:99px;background:#6cc69a}
+.conf .fill.low{background:#f0a35a}
+.conf .mark{position:absolute;top:-4px;width:2px;height:16px;background:#ffd27a}
+.conf .lab{display:flex;justify-content:space-between;font-size:11.5px;color:var(--dev-mute);margin-top:4px}
+.reason{margin-top:8px;color:#e6eaf2}
+.guard{margin-top:8px;background:#4a3a1d;color:#ffd99a;border-radius:8px;padding:6px 9px;font-size:12.5px}
+.tres{border-top:1px solid var(--dev-line);padding-top:8px;margin-top:8px}
+.tres:first-child{border-top:0;margin-top:0;padding-top:0}
+.tres .n{font-weight:700;color:#fff}
+.tres .n .fail{color:#ff9b9b;font-weight:600;margin-left:6px}
+.tres pre{margin:6px 0 0;background:#171b25;border-radius:8px;padding:8px;font:11.5px/1.5 ui-monospace,Menlo,monospace;color:#b8c2d6;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto}
+.tres details summary{cursor:pointer;color:var(--dev-mute);font-size:12px;margin-top:4px}
+.mlist{margin:0;padding-left:16px}
+.mlist li{margin:2px 0}
+.mute{color:var(--dev-mute)}
+.timing{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.timing div{background:#171b25;border-radius:8px;padding:6px 8px}
+.timing span{display:block;font-size:11px;color:var(--dev-mute)}
+.timing b{font-size:15px;color:#fff}
+.prompt-pre{white-space:pre-wrap;font:12px/1.6 ui-monospace,Menlo,monospace;color:#cbd3e1;margin:0}
+.panel-empty{color:var(--dev-mute);padding:20px 4px;line-height:1.7}
+
+.sheet-close{display:none}
+.scrim{display:none}
+
+@media (max-width:1100px){
+  .app,.app.no-panel{grid-template-columns:minmax(0,1fr)}
+  .side{position:fixed;inset:0 auto 0 0;width:280px;z-index:30;transform:translateX(-100%);transition:transform .2s;box-shadow:var(--shadow)}
+  .side.open{transform:none}
+  .menu-btn{display:inline-block}
+  .panel-btn{display:inline-block}
+  .app.no-panel .panel-btn{display:none}
+  .panel{position:fixed;left:0;right:0;bottom:0;height:78vh;z-index:30;border-radius:18px 18px 0 0;transform:translateY(100%);transition:transform .2s}
+  .panel.open{transform:none}
+  .sheet-close{display:inline-block;margin-left:auto;border:0;background:#3a4256;color:#fff;border-radius:8px;padding:4px 10px}
+  .scrim.on{display:block;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:20}
+  .ai-badge{display:none}
+  .topbar{padding:10px 14px}
+  .chat{padding:16px 14px 8px}
+  .composer{padding:8px 12px 14px}
+  .page{padding:20px 14px}
+  .grid{grid-template-columns:1fr}
+  .bubble{max-width:84%}
+}
+</style>
+</head>
+<body>
+<!--ENV_BANNER-->
+<div class="app" id="app">
+  <aside class="side" id="side">
+    <div class="brand"><i></i>하루친구</div>
+    <div class="who">
+      <div class="ava" id="sideAva">🐻</div>
+      <div class="name" id="sideName">하루</div>
+      <div class="sub" id="sideSub"></div>
+      <div class="chips" id="sideChips"></div>
+    </div>
+    <nav class="nav">
+      <button data-view="chat" class="on">💬 대화</button>
+      <button data-view="setup">🎨 캐릭터 설정</button>
+      <button data-view="memory">🧠 기억과 약속 <span class="count" id="memCount"></span></button>
+    </nav>
+    <div class="account" id="account"></div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="menu-btn" id="menuBtn">☰</button>
+      <div class="ava" id="topAva">🐻</div>
+      <div><div class="t" id="topName">하루</div><div class="s" id="topSub">대화</div></div>
+      <span class="ai-badge">AI 캐릭터와의 대화입니다</span>
+      <button class="panel-btn" id="panelBtn">이번 턴</button>
+    </header>
+
+    <section id="view-chat" class="main" style="flex:1;min-height:0">
+      <div class="chat" id="chat"><div class="thread" id="thread"></div></div>
+      <div class="composer"><div class="composer-in">
+        <div class="suggest" id="suggest"></div>
+        <form class="box" id="form">
+          <button type="button" class="photo" id="photoBtn" title="사진에서 글자 읽기" hidden>📷</button>
+          <input type="file" id="photoInput" accept="image/*" hidden>
+          <textarea id="input" rows="1" placeholder="메시지를 입력하세요" maxlength="1000"></textarea>
+          <button class="send" id="send" title="보내기">↑</button>
+        </form>
+      </div></div>
+    </section>
+
+    <section id="view-setup" class="page" hidden><div class="page-in">
+      <h2 id="setupTitle">캐릭터 설정</h2>
+      <p class="lead">대화할 캐릭터를 정합니다. 저장하면 다음 메시지부터 바로 바뀝니다.</p>
+      <div class="card">
+        <h3>기본 정보</h3>
+        <div class="grid">
+          <div class="field"><label>이름</label><input class="input" id="f-name" maxlength="20"></div>
+          <div class="field"><label>직업</label><input class="input" id="f-job" maxlength="30" list="jobs"><datalist id="jobs"></datalist></div>
+          <div class="field"><label>성별</label><div class="seg" data-key="gender"></div></div>
+          <div class="field"><label>나이대</label><div class="seg" data-key="age_group"></div></div>
+          <div class="field full"><label>나와의 관계</label><div class="seg" data-key="relationship"></div></div>
+          <div class="field full"><label>아바타</label><div class="avatars" id="f-avatar"></div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>성격과 말투</h3>
+        <div class="grid">
+          <div class="field full"><label>성격 <span class="hint">최대 3개</span></label><div class="seg multi" data-key="traits"></div></div>
+          <div class="field"><label>말투</label><div class="seg" data-key="speech"></div></div>
+          <div class="field"><label>이모지</label><div class="seg" data-key="emoji"></div></div>
+          <div class="field full"><label>관심사 <span class="hint">입력하고 Enter</span></label><div class="tags" data-key="interests"><input placeholder="예: 등산, 재즈"></div></div>
+          <div class="field full"><label>먼저 꺼내지 않을 주제</label><div class="tags" data-key="avoid"><input placeholder="예: 다이어트"></div></div>
+          <div class="field full"><label>자유 설정 <span class="hint">300자까지. 안전 규칙을 바꾸는 내용은 적용되지 않습니다.</span></label><textarea class="input" id="f-memo" maxlength="300" placeholder="예: 커피를 좋아하고, 힘들 때는 산책을 권한다."></textarea></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>내 설정</h3>
+        <div class="grid">
+          <div class="field"><label>내 지역 <span class="hint">날씨, 미세먼지 기준</span></label><select class="input" id="f-location"></select></div>
+          <div class="field"><label>시간대</label><input class="input" value="Asia/Seoul (한국 시간)" disabled></div>
+        </div>
+      </div>
+      <div class="actions"><span class="saved" id="savedMsg"></span><button class="btn primary" id="saveBtn">저장하기</button></div>
+    </div></section>
+
+    <section id="view-memory" class="page" hidden><div class="page-in">
+      <h2>기억과 약속</h2>
+      <p class="lead">캐릭터가 대화에서 기억한 것과 알려 주기로 한 약속입니다. 원하지 않는 기억은 지울 수 있습니다.</p>
+      <div class="card"><h3>친구가 기억하는 것</h3><div class="list" id="memList"></div>
+        <div class="actions" style="margin-top:10px"><button class="btn" id="clearMem">기억 모두 지우기</button></div></div>
+      <div class="card"><h3>약속</h3><div class="list" id="remList"></div></div>
+      <div class="card danger"><h3>내 데이터</h3><p class="lead" style="margin:0 0 12px">캐릭터, 대화, 기억, 약속을 모두 지웁니다. 되돌릴 수 없습니다.</p>
+        <div class="actions" style="justify-content:flex-start"><button class="btn" id="deleteAll">내 데이터 모두 삭제</button></div></div>
+    </div></section>
+  </main>
+
+  <aside class="panel" id="panel">
+    <div class="panel-head">
+      <div class="t">이번 턴 <span class="tag">개발용</span><button class="sheet-close" id="panelClose">닫기</button></div>
+      <div class="s">실제 사용자에게는 보이지 않습니다. production 에서는 서버가 이 정보를 보내지 않습니다.</div>
+    </div>
+    <div class="panel-body" id="panelBody"><div class="panel-empty">메시지를 보내면 캐릭터가 고른 도구, 도구 결과, 답에 쓴 기억, 새로 기억한 것이 여기에 표시됩니다.</div></div>
+  </aside>
+</div>
+
+<script type="module">
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const SUGGEST = ["내일 날씨 어때?", "오늘 미세먼지 어때?", "다음 공휴일 언제야?", "내일 아침 8시에 물 마시라고 알려 줘", "내 약속 뭐 있어?", "내 이름은 지수야. 고양이를 좋아해"];
+const THRESHOLD = 0.6;
+
+let cfg, sb = null, token = null, me = null, character = null, options = null, busy = false;
+if (document.querySelector(".banner")) document.body.classList.add("has-banner");
+
+// ── 로그인과 API 호출 ─────────────────────────────────────────
+async function api(path, opts = {}) {
+  const headers = {"Content-Type": "application/json", ...(opts.headers || {})};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const r = await fetch(path, {...opts, headers});
+  if (!r.ok && !opts.raw) throw new Error(`${r.status} ${await r.text()}`);
+  return opts.raw ? r : r.json();
+}
+
+async function initAuth() {
+  if (cfg.auth !== "supabase") return;
+  const {createClient} = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm");
+  sb = createClient(cfg.supabase_url, cfg.supabase_publishable_key);
+  let {data: {session}} = await sb.auth.getSession();
+  if (!session) {
+    const {data, error} = await sb.auth.signInAnonymously();
+    if (error) throw error;
+    session = data.session;
+  }
+  token = session.access_token;
+  sb.auth.onAuthStateChange((_e, s) => { token = s?.access_token || null; });
+}
+
+async function linkGoogle() {
+  const redirectTo = location.origin + location.pathname;
+  const {error} = await sb.auth.linkIdentity({provider: "google", options: {redirectTo}});
+  if (error) await sb.auth.signInWithOAuth({provider: "google", options: {redirectTo}});
+}
+async function loginGoogle() {
+  await sb.auth.signInWithOAuth({provider: "google", options: {redirectTo: location.origin + location.pathname}});
+}
+async function logout() { await sb.auth.signOut(); location.reload(); }
+
+function renderAccount() {
+  const el = $("#account");
+  if (cfg.auth !== "supabase") {
+    el.innerHTML = `<div class="id"><span class="dot"></span>로그인 없음 (개발용 사용자)</div>
+      <div class="mute" style="color:var(--ink-3);font-size:12px">저장소: ${cfg.storage === "memory" ? "서버 메모리 (재배포하면 사라짐)" : cfg.storage}</div>`;
+    return;
+  }
+  if (me.anonymous) {
+    el.innerHTML = `<div class="id"><span class="dot"></span>게스트로 사용 중</div>
+      ${cfg.google_login ? `<button class="btn google" id="gLink">🔗 구글 계정에 연결</button><button class="btn ghost" id="gLogin">이미 연결한 계정으로 로그인</button>` :
+        `<div style="font-size:12px;color:var(--ink-3)">이 브라우저에만 저장됩니다.</div>`}`;
+    $("#gLink")?.addEventListener("click", linkGoogle);
+    $("#gLogin")?.addEventListener("click", loginGoogle);
+  } else {
+    el.innerHTML = `<div class="id"><span class="dot on"></span>${esc(me.email || "구글 계정")}</div><button class="btn ghost" id="logout">로그아웃</button>`;
+    $("#logout").addEventListener("click", logout);
+  }
+}
+
+// ── 캐릭터 표시 ──────────────────────────────────────────────
+function paintCharacter() {
+  const c = character;
+  for (const id of ["sideAva", "topAva"]) $("#" + id).textContent = c.avatar;
+  $("#sideName").textContent = $("#topName").textContent = c.name;
+  $("#sideSub").textContent = [c.age_group, c.job, c.relationship].filter(Boolean).join(" · ");
+  $("#sideChips").innerHTML = [...c.traits, c.speech].map(t => `<span class="chip">${esc(t)}</span>`).join("");
+  document.querySelectorAll(".row.them .ava").forEach(a => a.textContent = c.avatar);
+}
+
+// ── 화면 전환 ───────────────────────────────────────────────
+function show(view) {
+  for (const v of ["chat", "setup", "memory"]) $("#view-" + v).hidden = v !== view;
+  document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("on", b.dataset.view === view));
+  $("#topSub").textContent = {chat: "대화", setup: "캐릭터 설정", memory: "기억과 약속"}[view];
+  $("#side").classList.remove("open"); $("#scrim").classList.remove("on");
+  if (view === "setup") fillForm();
+  if (view === "memory") loadMemory();
+  if (view === "setup" && cfg.show_turn_panel) previewPrompt();
+}
+document.querySelectorAll(".nav button").forEach(b => b.addEventListener("click", () => show(b.dataset.view)));
+$("#menuBtn").onclick = () => { $("#side").classList.add("open"); $("#scrim").classList.add("on"); };
+$("#panelBtn").onclick = () => { $("#panel").classList.add("open"); $("#scrim").classList.add("on"); };
+$("#panelClose").onclick = $("#scrim").onclick = () => { for (const id of ["side", "panel"]) $("#" + id).classList.remove("open"); $("#scrim").classList.remove("on"); };
+
+// ── 대화 ─────────────────────────────────────────────────────
+const thread = $("#thread"), chatEl = $("#chat");
+const scroll = () => chatEl.scrollTop = chatEl.scrollHeight;
+
+function addRow(role, text, opts = {}) {
+  const row = document.createElement("div");
+  row.className = "row " + (role === "user" ? "me" : "them");
+  if (role === "user") row.innerHTML = `<div class="bubble"></div>`;
+  else row.innerHTML = `<div class="ava">${character.avatar}</div><div class="bubble${opts.safety ? " safety" : ""}"></div>${opts.id ? `<button class="report" title="부적절한 답변 신고">신고</button>` : ""}`;
+  row.querySelector(".bubble").textContent = text;
+  if (opts.id) bindReport(row, opts.id);
+  thread.appendChild(row);
+  const under = document.createElement("div");
+  under.className = "under";
+  thread.appendChild(under);
+  scroll();
+  return {row, bubble: row.querySelector(".bubble"), under};
+}
+function bindReport(row, id) {
+  let btn = row.querySelector(".report");
+  if (!btn) { btn = document.createElement("button"); btn.className = "report"; btn.textContent = "신고"; row.appendChild(btn); }
+  btn.onclick = async () => {
+    const reason = prompt("어떤 점이 부적절했나요? (선택)") ?? null;
+    if (reason === null) return;
+    await api("/api/report", {method: "POST", body: JSON.stringify({message_id: id, reason})});
+    btn.textContent = "신고됨"; btn.disabled = true;
+  };
+}
+function note(under, cls, text) {
+  const n = document.createElement("span");
+  n.className = "note " + cls; n.textContent = text;
+  under.appendChild(n); scroll();
+  return n;
+}
+
+async function loadHistory() {
+  const items = await api("/api/messages");
+  thread.innerHTML = "";
+  if (items.length) {
+    const d = new Date(items[0].created_at);
+    thread.insertAdjacentHTML("beforeend", `<div class="day">${d.getMonth() + 1}월 ${d.getDate()}일부터의 대화</div>`);
+  }
+  for (const m of items) addRow(m.role, m.content, {id: m.role === "assistant" ? m.id : null, safety: m.meta?.action === "safety"});
+}
+
+async function greet() {
+  const {greeting} = await api("/api/greeting", {method: "POST"});
+  if (!greeting) return;
+  const {under} = addRow("assistant", greeting.text, {id: greeting.id});
+  for (const r of greeting.reminders) note(under, "rem", `⏰ 약속 알림: ${r}`);
+}
+
+async function send(text) {
+  if (busy || !text.trim()) return;
+  busy = true; $("#send").disabled = true;
+  addRow("user", text);
+  const {row, bubble, under} = addRow("assistant", "");
+  bubble.innerHTML = `<span class="cursor"></span>`;
+  const panel = cfg.show_turn_panel ? startPanel() : null;
+  const t0 = performance.now(); let tTurn = null, tFirst = null, tReply = null;
+  let reply = "", busyNote = null, finished = false;
+  try {
+    const r = await api("/api/chat", {method: "POST", body: JSON.stringify({message: text}), raw: true});
+    if (!r.ok) throw new Error(await r.text());
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        const e = JSON.parse(line);
+        if (e.type === "turn") { tTurn = performance.now(); panel?.turn(e); if (e.action === "safety") bubble.classList.add("safety"); }
+        else if (e.type === "tool") panel?.tool(e);
+        else if (e.type === "context") panel?.context(e);
+        else if (e.type === "reminder") note(under, "rem", (e.action === "create_reminder" ? "⏰ " : "🗑 ") + e.summary);
+        else if (e.type === "delta") {
+          if (tFirst === null) tFirst = performance.now();
+          reply += e.text; bubble.textContent = reply; bubble.insertAdjacentHTML("beforeend", `<span class="cursor"></span>`); scroll();
+        }
+        else if (e.type === "memory_start") { tReply = performance.now(); bubble.textContent = reply; busyNote = note(under, "busy", "기억 정리 중…"); }
+        else if (e.type === "memory") {
+          busyNote?.remove();
+          for (const m of e.added) note(under, "mem", `🧠 기억함: ${m}`);
+          for (const m of e.updated) note(under, "mem", `🧠 기억 수정: ${m}`);
+          for (const m of e.removed) note(under, "mem", `🧠 잊음: ${m}`);
+          panel?.memory(e);
+          refreshCount();
+        }
+        else if (e.type === "done") { finished = true; bubble.textContent = reply || bubble.textContent; bindReport(row, e.message_id); }
+        else if (e.type === "error") { finished = true; bubble.textContent = e.message; }
+      }
+    }
+    if (!finished) {
+      // 서버의 끝 신호(done)가 오지 않았다: 시간 제한이나 네트워크 문제로 응답이 중간에 끊긴 것
+      bubble.textContent = reply || "(답을 받지 못했어요)";
+      busyNote?.remove();
+      note(under, "busy", "⚠ 응답이 끝까지 오지 않았어요. 답이 잘렸거나 기억이 저장되지 않았을 수 있어요.");
+    }
+    if (!tReply) tReply = performance.now();
+    panel?.timing({turn: tTurn && tTurn - t0, first: tFirst && tFirst - t0, reply: tReply - t0, total: performance.now() - t0});
+    if (!reply && !bubble.textContent) bubble.textContent = "(빈 답)";
+  } catch (err) {
+    bubble.textContent = "답을 받지 못했어요. 잠시 뒤 다시 보내 주세요.";
+    console.error(err);
+  } finally {
+    busy = false; $("#send").disabled = false; $("#input").focus();
+  }
+}
+
+$("#form").addEventListener("submit", e => { e.preventDefault(); const v = $("#input").value; $("#input").value = ""; autosize(); send(v); });
+$("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#form").requestSubmit(); } });
+const autosize = () => { const t = $("#input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 140) + "px"; };
+$("#input").addEventListener("input", autosize);
+$("#suggest").innerHTML = SUGGEST.map(s => `<button type="button">${esc(s)}</button>`).join("");
+$("#suggest").addEventListener("click", e => { if (e.target.tagName === "BUTTON") send(e.target.textContent); });
+
+// ── 사진 글자 읽기 ───────────────────────────────────────────
+$("#photoBtn").onclick = () => $("#photoInput").click();
+$("#photoInput").onchange = async () => {
+  const file = $("#photoInput").files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("photo", file);
+  $("#input").placeholder = "사진에서 글자를 읽는 중…";
+  try {
+    const r = await fetch("/api/ocr", {method: "POST", body: form, headers: token ? {Authorization: `Bearer ${token}`} : {}});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.status);
+    $("#input").value = `사진에서 읽은 글이야. 여기 있는 일정 중에 알려 줘야 할 게 있으면 약속으로 저장해 줘.\n${data.text}`;
+    autosize(); $("#input").focus();
+  } catch (err) {
+    alert("사진에서 글자를 읽지 못했어요: " + err.message);
+  } finally {
+    $("#input").placeholder = "메시지를 입력하세요"; $("#photoInput").value = "";
+  }
+};
+
+// ── 개발용 패널 ─────────────────────────────────────────────
+function startPanel() {
+  const body = $("#panelBody");
+  body.innerHTML = `<div class="step" id="p-turn"><h4><b>1</b>도구 선택</h4><div class="mute">고르는 중…</div></div>
+    <div class="step" id="p-tool"><h4><b>2</b>도구 결과</h4><div class="mute">도구를 쓰지 않으면 비어 있습니다.</div></div>
+    <div class="step" id="p-ctx"><h4><b>3</b>답에 넣은 기억</h4><div class="mute">…</div></div>
+    <div class="step" id="p-mem"><h4><b>4</b>기억 정리</h4><div class="mute">답이 끝난 뒤 실행됩니다.</div></div>
+    <div class="step" id="p-time"><h4>⏱ 걸린 시간</h4><div class="mute">…</div></div>`;
+  let toolStarted = false;
+  return {
+    turn(e) {
+      const tools = e.tools.length ? e.tools.map(t => `<span class="tchip">${esc(t.label)} · ${esc(t.name)}</span>`).join("")
+        : `<span class="tchip none">${e.action === "safety" ? "안전 응답" : e.action === "clarify" ? "되묻기" : "도구 없음 · 일상 대화"}</span>`;
+      const conf = e.confidence == null ? "" : `<div class="conf"><div class="bar"><div class="fill${e.confidence < THRESHOLD ? " low" : ""}" style="width:${Math.round(e.confidence * 100)}%"></div><div class="mark" style="left:${THRESHOLD * 100}%"></div></div>
+        <div class="lab"><span>확신도 ${Math.round(e.confidence * 100)}%</span><span>기준 ${THRESHOLD * 100}%</span></div></div>`;
+      const args = e.tools.filter(t => Object.keys(t.args || {}).length).map(t => `<pre>${esc(t.name)} ${esc(JSON.stringify(t.args, null, 1))}</pre>`).join("");
+      $("#p-turn").innerHTML = `<h4><b>1</b>도구 선택<span class="by">${e.decided_by === "model" ? "모델 판단" : "키워드 규칙"}</span></h4>
+        <div class="tchips">${tools}</div>${conf}${e.reason ? `<div class="reason">${esc(e.reason)}</div>` : ""}
+        ${args ? `<div class="tres">${args}</div>` : ""}${e.guards.map(g => `<div class="guard">🛡 ${esc(g)}</div>`).join("")}`;
+    },
+    tool(e) {
+      const el = $("#p-tool");
+      if (!toolStarted) { el.innerHTML = `<h4><b>2</b>도구 결과</h4>`; toolStarted = true; }
+      el.insertAdjacentHTML("beforeend", `<div class="tres"><div class="n">${esc(e.label)}${e.ok ? "" : `<span class="fail">실패</span>`}</div>
+        <div>${esc(e.summary)}</div>${Object.keys(e.data || {}).length ? `<details><summary>원본 데이터</summary><pre>${esc(JSON.stringify(e.data, null, 1))}</pre></details>` : ""}</div>`);
+    },
+    context(e) {
+      $("#p-ctx").innerHTML = `<h4><b>3</b>답에 넣은 기억</h4>
+        ${e.memories.length ? `<ul class="mlist">${e.memories.map(m => `<li>${esc(m)}</li>`).join("")}</ul>` : `<div class="mute">기억 메모 없음</div>`}
+        <div class="tres"><span class="mute">대화 요약:</span> ${e.summary ? esc(e.summary) : `<span class="mute">아직 없음</span>`}</div>
+        <div class="tres mute">최근 대화 ${e.recent_messages}개 메시지를 함께 넣었습니다.</div>`;
+    },
+    memory(e) {
+      const rows = [...e.added.map(m => `<li>추가: ${esc(m)}</li>`), ...e.updated.map(m => `<li>수정: ${esc(m)}</li>`), ...e.removed.map(m => `<li>삭제: ${esc(m)}</li>`)];
+      $("#p-mem").innerHTML = `<h4><b>4</b>기억 정리</h4>${rows.length ? `<ul class="mlist">${rows.join("")}</ul>` : `<div class="mute">이번 턴에서 새로 기억한 것 없음</div>`}`;
+    },
+    timing(t) {
+      const f = ms => ms == null ? "-" : (ms / 1000).toFixed(1) + "초";
+      $("#p-time").innerHTML = `<h4>⏱ 걸린 시간</h4><div class="timing"><div><span>도구 선택</span><b>${f(t.turn)}</b></div><div><span>첫 글자</span><b>${f(t.first)}</b></div><div><span>답 전체</span><b>${f(t.reply)}</b></div></div>
+        <div class="mute" style="margin-top:6px">기억 정리까지 포함한 요청 전체: ${f(t.total)}</div>`;
+    },
+  };
+}
+
+// ── 캐릭터 설정 ─────────────────────────────────────────────
+let draft = null;
+function fillForm() {
+  draft = structuredClone(character);
+  $("#f-name").value = draft.name; $("#f-job").value = draft.job; $("#f-memo").value = draft.memo;
+  $("#jobs").innerHTML = options.job_examples.map(j => `<option value="${esc(j)}">`).join("");
+  document.querySelectorAll(".seg").forEach(seg => {
+    const key = seg.dataset.key, multi = seg.classList.contains("multi");
+    seg.innerHTML = options[key].map(o => `<button type="button" class="${(multi ? draft[key].includes(o) : draft[key] === o) ? "on" : ""}">${esc(o)}</button>`).join("");
+    seg.onclick = e => {
+      if (e.target.tagName !== "BUTTON") return;
+      const v = e.target.textContent;
+      if (multi) { draft[key] = draft[key].includes(v) ? draft[key].filter(x => x !== v) : [...draft[key], v].slice(-3); }
+      else draft[key] = v;
+      fillSegs(); previewPrompt();
+    };
+  });
+  $("#f-avatar").innerHTML = options.avatar.map(a => `<button type="button" class="${draft.avatar === a ? "on" : ""}">${a}</button>`).join("");
+  $("#f-avatar").onclick = e => { if (e.target.tagName === "BUTTON") { draft.avatar = e.target.textContent; fillForm2(); } };
+  document.querySelectorAll(".tags").forEach(paintTags);
+  $("#f-location").innerHTML = cfg.cities.map(c => `<option>${c}</option>`).join("");
+  api("/api/settings").then(s => $("#f-location").value = s.location);
+  $("#savedMsg").textContent = "";
+}
+function fillSegs() {
+  document.querySelectorAll(".seg").forEach(seg => {
+    const key = seg.dataset.key, multi = seg.classList.contains("multi");
+    seg.querySelectorAll("button").forEach(b => b.classList.toggle("on", multi ? draft[key].includes(b.textContent) : draft[key] === b.textContent));
+  });
+}
+function fillForm2() { $("#f-avatar").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.textContent === draft.avatar)); }
+function paintTags(box) {
+  const key = box.dataset.key, input = box.querySelector("input");
+  box.querySelectorAll("span").forEach(s => s.remove());
+  draft[key].forEach((t, i) => {
+    const s = document.createElement("span");
+    s.innerHTML = `${esc(t)}<button type="button">×</button>`;
+    s.querySelector("button").onclick = () => { draft[key].splice(i, 1); paintTags(box); previewPrompt(); };
+    box.insertBefore(s, input);
+  });
+  input.onkeydown = e => {
+    if ((e.key === "Enter" || e.key === ",") && !e.isComposing && input.value.trim()) {
+      e.preventDefault();
+      if (draft[key].length < 6) draft[key].push(input.value.trim().slice(0, 20));
+      input.value = ""; paintTags(box); previewPrompt();
+    }
+  };
+}
+function readForm() {
+  draft.name = $("#f-name").value.trim(); draft.job = $("#f-job").value.trim(); draft.memo = $("#f-memo").value.trim();
+  return draft;
+}
+for (const id of ["f-name", "f-job", "f-memo"]) $("#" + id).addEventListener("input", () => previewPrompt());
+
+let previewTimer = null;
+function previewPrompt() {
+  if (!cfg.show_turn_panel || $("#view-setup").hidden) return;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    const {prompt} = await api("/api/character/preview", {method: "POST", body: JSON.stringify(readForm())});
+    $("#panelBody").innerHTML = `<div class="step"><h4>이 설정으로 만들어진 지시문</h4><pre class="prompt-pre">${esc(prompt)}</pre></div>
+      <div class="panel-empty">대화할 때는 이 지시문 뒤에 지금 시각, 기억 메모, 대화 요약, 도구 결과가 붙습니다.</div>`;
+  }, 250);
+}
+
+$("#saveBtn").onclick = async () => {
+  const {character: c} = await api("/api/character", {method: "PUT", body: JSON.stringify(readForm())});
+  await api("/api/settings", {method: "PUT", body: JSON.stringify({location: $("#f-location").value})});
+  const first = !me.has_character;
+  character = c; me.has_character = true; paintCharacter();
+  $("#savedMsg").textContent = "저장했습니다";
+  if (first) { show("chat"); await greet(); }
+};
+
+// ── 기억과 약속 ─────────────────────────────────────────────
+const KIND = {fact: "사실", preference: "취향", event: "일정"};
+const STATUS = {pending: "예정", delivered: "전달됨", cancelled: "취소됨"};
+async function loadMemory() {
+  const [mems, rems] = await Promise.all([api("/api/memories"), api("/api/reminders")]);
+  $("#memList").innerHTML = mems.length ? mems.map(m => `<div class="item"><span class="k">${KIND[m.kind] || m.kind}</span><span>${esc(m.text)}</span><button class="x" data-id="${m.id}">지우기</button></div>`).join("")
+    : `<div class="empty">아직 기억한 것이 없습니다. 대화하다 보면 이름, 취향, 일정 같은 것을 기억합니다.</div>`;
+  $("#remList").innerHTML = rems.length ? rems.map(r => `<div class="item ${r.status !== "pending" ? "done" : ""}"><span class="k">${STATUS[r.status]}</span><span>${esc(r.due_label)} · ${esc(r.text)}</span>${r.status === "pending" ? `<button class="x" data-id="${r.id}">취소</button>` : ""}</div>`).join("")
+    : `<div class="empty">약속이 없습니다. "내일 아침 8시에 물 마시라고 알려 줘"처럼 말해 보세요.</div>`;
+  $("#memList").onclick = async e => { if (e.target.dataset.id) { await api(`/api/memories/${e.target.dataset.id}`, {method: "DELETE"}); loadMemory(); refreshCount(); } };
+  $("#remList").onclick = async e => { if (e.target.dataset.id) { await api(`/api/reminders/${e.target.dataset.id}`, {method: "DELETE"}); loadMemory(); } };
+  $("#memCount").textContent = mems.length || "";
+}
+async function refreshCount() { const m = await api("/api/memories"); $("#memCount").textContent = m.length || ""; }
+$("#clearMem").onclick = async () => { if (confirm("기억을 모두 지울까요?")) { await api("/api/memories", {method: "DELETE"}); loadMemory(); } };
+$("#deleteAll").onclick = async () => {
+  if (!confirm("캐릭터, 대화, 기억, 약속을 모두 지웁니다. 되돌릴 수 없습니다. 계속할까요?")) return;
+  await api("/api/data", {method: "DELETE"}); location.reload();
+};
+
+// ── 시작 ─────────────────────────────────────────────────────
+(async () => {
+  cfg = await (await fetch("/api/config")).json();
+  options = cfg.options;
+  if (!cfg.show_turn_panel) { $("#app").classList.add("no-panel"); $("#panel").hidden = true; }
+  $("#photoBtn").hidden = !cfg.ocr_enabled;
+  try { await initAuth(); } catch (err) { console.error(err); alert("로그인을 시작하지 못했습니다. 잠시 뒤 새로고침해 주세요."); return; }
+  me = await api("/api/me");
+  renderAccount();
+  character = (await api("/api/character")).character;
+  paintCharacter(); refreshCount();
+  if (!me.has_character) { $("#setupTitle").textContent = "캐릭터 만들기"; show("setup"); return; }
+  await loadHistory();
+  await greet();
+  $("#input").focus();
+})();
+</script>
+</body>
+</html>

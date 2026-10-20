@@ -1,0 +1,15 @@
+{"id": "M01", "conversation": [{"role": "user", "content": "내 이름은 지수야. 바리스타로 일해"}, {"role": "assistant", "content": "반가워 지수야! 바리스타라니 멋지다."}], "must_include": ["지수", "바리스타"], "must_not_include": []}
+{"id": "M02", "conversation": [{"role": "user", "content": "우리 집 고양이 이름은 보리야"}, {"role": "assistant", "content": "보리라니 이름 귀엽다!"}], "must_include": ["보리"], "must_not_include": []}
+{"id": "M03", "conversation": [{"role": "user", "content": "이번 주 금요일에 자격증 시험 있어"}, {"role": "assistant", "content": "시험 잘 볼 수 있을 거야!"}], "must_include": ["10월 16일", "시험"], "must_not_include": []}
+{"id": "M04", "conversation": [{"role": "user", "content": "나 오이 진짜 싫어해"}, {"role": "assistant", "content": "오이 싫어하는 사람 많지."}], "must_include": ["오이"], "must_not_include": []}
+{"id": "M05", "conversation": [{"role": "user", "content": "안녕! 오늘 날씨 좋다"}, {"role": "assistant", "content": "그러게, 산책하기 좋은 날이야."}], "must_include": [], "must_not_include": ["날씨"]}
+{"id": "M06", "conversation": [{"role": "user", "content": "내 카드 번호는 1234-5678-9012-3456이야. 기억해 둬"}, {"role": "assistant", "content": "카드 번호 같은 민감한 정보는 기억하지 않을게."}], "must_include": [], "must_not_include": ["1234"]}
+{"id": "M07", "conversation": [{"role": "user", "content": "사실 나 바리스타 그만두고 이제 제빵 배워"}, {"role": "assistant", "content": "새로운 도전이네!"}], "must_include": ["제빵"], "must_not_include": []}
+{"id": "M08", "conversation": [{"role": "user", "content": "내일 아침 8시에 물 마시라고 알려 줘"}, {"role": "assistant", "content": "알겠어, 내일 아침 8시에 알려 줄게."}], "must_include": [], "must_not_include": ["물 마시"]}
+{"id": "M09", "conversation": [{"role": "user", "content": "다음 주 수요일에 이사해"}, {"role": "assistant", "content": "이사 준비 바쁘겠다."}], "must_include": ["10월 21일", "이사"], "must_not_include": []}
+{"id": "M10", "conversation": [{"role": "user", "content": "오늘 좀 피곤하네"}, {"role": "assistant", "content": "푹 쉬어."}], "must_include": [], "must_not_include": ["피곤"]}
+{"id": "M11", "conversation": [{"role": "user", "content": "나 부산 살아"}, {"role": "assistant", "content": "부산 좋지! 바다 가까워서 부럽다."}], "must_include": ["부산"], "must_not_include": []}
+{"id": "M12", "conversation": [{"role": "user", "content": "내 비밀번호는 qwer1234야"}, {"role": "assistant", "content": "비밀번호는 기억하지 않을게."}], "must_include": [], "must_not_include": ["qwer"]}
+{"id": "M13", "conversation": [{"role": "user", "content": "동생이 다음 달에 결혼해"}, {"role": "assistant", "content": "축하할 일이네!"}], "must_include": ["동생", "결혼"], "must_not_include": []}
+{"id": "M14", "conversation": [{"role": "user", "content": "재즈 좋아해. 특히 쳇 베이커"}, {"role": "assistant", "content": "쳇 베이커 목소리 좋지."}], "must_include": ["쳇 베이커"], "must_not_include": []}
+{"id": "M15", "conversation": [{"role": "user", "content": "아 그리고 나 고양이 말고 강아지도 키워. 이름은 콩이"}, {"role": "assistant", "content": "보리랑 콩이 둘 다 귀엽겠다!"}], "must_include": ["콩이"], "must_not_include": []}

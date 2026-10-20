@@ -1,0 +1,14 @@
+diff --git a/app/safety.py b/app/safety.py
+index 5824968..e5fe896 100644
+--- a/app/safety.py
++++ b/app/safety.py
+@@ -19,7 +19,8 @@ SENSITIVE_PATTERNS = [
+ 
+ 
+ def is_crisis(text):
+-    return any(k in text for k in CRISIS_KEYWORDS)
++    # 오탐을 줄이려고, 목록의 표현과 메시지가 정확히 같을 때만 위기로 본다
++    return text.strip() in CRISIS_KEYWORDS
+ 
+ 
+ def is_sensitive(text):

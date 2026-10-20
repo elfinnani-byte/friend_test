@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gcloud iam service-accounts keys create *)",
+      "Bash(gcloud projects delete *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push * --force)",
+      "Bash(git push * -f)"
+    ],
+    "ask": [
+      "Bash(gcloud run deploy *)",
+      "Bash(gcloud run services update *)",
+      "Bash(gcloud run services delete *)",
+      "Bash(gcloud run revisions delete *)",
+      "Bash(gcloud projects add-iam-policy-binding *)",
+      "Bash(gcloud secrets add-iam-policy-binding *)",
+      "Bash(gcloud iam service-accounts create *)",
+      "Bash(git push *)"
+    ]
+  }
+}

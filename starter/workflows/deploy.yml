@@ -1,0 +1,39 @@
+# main 브랜치에 머지되면 Cloud Run에 소스 배포한다.
+# 사용법: 이 파일을 .github/workflows/deploy.yml 로 복사하고, 저장소 Settings > Secrets and variables > Actions > Variables 에
+#   GCP_PROJECT_ID, WIF_PROVIDER, DEPLOY_SA, RUNTIME_SA 를 넣는다(값은 docs/wif-setup.md 절차의 결과).
+# 이 파일의 액션 버전은 바꾸지 않는다.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # GitHub이 Google Cloud에 "이 저장소의 이 워크플로"임을 증명하는 토큰을 받는 권한
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: friend-agent
+          region: us-central1
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          source: .
+          env_vars: |
+            COMMIT_SHA=${{ github.sha }}
+          flags: --service-account=${{ vars.RUNTIME_SA }}
+
+      - name: 배포 주소
+        run: echo "배포된 주소 ${{ steps.deploy.outputs.url }}"

@@ -1,0 +1,15 @@
+diff --git a/app/router.py b/app/router.py
+index a0fe448..20f518f 100644
+--- a/app/router.py
++++ b/app/router.py
+@@ -15,8 +15,9 @@ from app.tools import CITIES, TOOLS
+ CONFIDENCE_THRESHOLD = 0.6
+ MAX_TOOLS = 2
+ 
++# 날씨 이야기만 해도 날씨 도구를 부르는 경우가 많아, "날씨 알려"처럼 요청이 분명할 때만 고르게 좁힌다
+ KEYWORDS = {
+-    "get_weather": ["날씨", "비 와", "비와", "비 올", "비올", "우산", "더워", "추워", "덥", "춥", "기온", "눈 와", "눈 올", "뭐 입", "쌀쌀", "따뜻"],
++    "get_weather": ["날씨 알려", "비 와", "비와", "비 올", "비올", "우산", "더워", "추워", "덥", "춥", "기온", "눈 와", "눈 올", "뭐 입", "쌀쌀", "따뜻"],
+     "get_air_quality": ["미세먼지", "초미세", "공기", "마스크", "환기", "황사"],
+     "get_holidays": ["공휴일", "휴일", "연휴", "빨간 날", "빨간날", "쉬는 날"],
+ }
