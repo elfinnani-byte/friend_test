@@ -71,9 +71,9 @@ def load_settings():
     if provider not in PROVIDERS:
         stop(f"LLM_PROVIDER 값 '{provider}' 를 알 수 없어 앱을 시작하지 않습니다. openai, gemini, claude, fake 중 하나를 쓰세요.")
 
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()  # 키 이름을 OpenAI 공식 이름에 맞춘다
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
     if provider != "fake" and not api_key:
-        stop("OPENAI_API_KEY 환경변수가 없어 앱을 시작하지 않습니다.")
+        stop("LLM_API_KEY 환경변수가 없어 앱을 시작하지 않습니다.")
 
     env = os.environ.get("ENV", "local").strip()
     storage = os.environ.get("STORAGE", "memory").strip().lower()
