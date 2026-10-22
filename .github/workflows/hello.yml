@@ -1,0 +1,29 @@
+name: hello
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 러너 정보 보기
+        run: |
+          echo "시작한 이벤트: ${{ github.event_name }}"
+          echo "브랜치: ${{ github.head_ref || github.ref_name }}"
+          uname -a
+          python3 --version
+          echo "코드를 내려받기 전 파일 목록:"
+          ls -a
+
+      - name: 저장소 코드 내려받기
+        uses: actions/checkout@v7
+
+      - name: 내려받은 파일 보기
+        run: |
+          ls
+          if [ -f .env ]; then echo ".env 있음"; else echo ".env 없음"; fi
