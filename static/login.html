@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>하루친구 · 입장</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+:root{--bg:#f5f3ef;--surface:#fff;--line:#e8e4dd;--ink:#22201d;--ink-2:#5d5850;--ink-3:#8f887d;
+  --accent:#f7585c;--accent-ink:#fff;--warn:#b3312c;--radius:16px;
+  --shadow:0 1px 2px rgba(30,25,20,.06),0 8px 24px rgba(30,25,20,.06)}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Pretendard Variable",Pretendard,-apple-system,system-ui,sans-serif;
+  display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-left))}
+.card{width:100%;max-width:360px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px 24px;display:grid;gap:18px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:17px}
+.brand i{width:10px;height:10px;border-radius:50%;background:var(--accent);display:inline-block}
+.ava{width:64px;height:64px;font-size:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:50%;margin:0 auto}
+h1{margin:0;font-size:19px;text-align:center}
+p{margin:0;color:var(--ink-2);font-size:14px;text-align:center}
+form{display:grid;gap:10px}
+label{font-size:13px;font-weight:600;color:var(--ink-2)}
+input{font:inherit;width:100%;padding:11px 14px;border:1px solid var(--line);border-radius:12px;background:#faf9f7}
+input:focus{outline:2px solid var(--accent);outline-offset:1px;background:#fff}
+button{font:inherit;font-weight:700;padding:11px;border:0;border-radius:12px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+.err{color:var(--warn);font-size:13px;min-height:1.4em;text-align:center}
+.foot{font-size:12px;color:var(--ink-3);text-align:center}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="brand"><i></i>하루친구</div>
+  <div class="ava" aria-hidden="true">🐶</div>
+  <div>
+    <h1>입장 비밀번호</h1>
+    <p>실습용 서비스라 비밀번호를 아는 사람만 들어올 수 있어요.</p>
+  </div>
+  <form id="f">
+    <label for="pw">비밀번호</label>
+    <input id="pw" type="password" autocomplete="current-password" required autofocus>
+    <button id="go" type="submit">들어가기</button>
+    <div class="err" id="err" role="alert"></div>
+  </form>
+  <div class="foot">비밀번호는 서비스 운영자에게 받아 주세요.</div>
+</main>
+<script>
+const f = document.getElementById("f"), pw = document.getElementById("pw"),
+      go = document.getElementById("go"), err = document.getElementById("err");
+f.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  go.disabled = true; err.textContent = "";
+  try {
+    const r = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
+                                         body: JSON.stringify({password: pw.value})});
+    if (r.ok) { location.replace("/"); return; }
+    const d = await r.json().catch(() => ({}));
+    err.textContent = d.detail || "들어가지 못했어요. 잠시 뒤 다시 시도해 주세요.";
+    pw.select();
+  } catch {
+    err.textContent = "서버에 연결하지 못했어요. 잠시 뒤 다시 시도해 주세요.";
+  } finally { go.disabled = false; }
+});
+</script>
+</body>
+</html>

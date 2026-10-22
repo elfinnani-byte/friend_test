@@ -306,6 +306,7 @@ async function api(path, opts = {}) {
   const headers = {"Content-Type": "application/json", ...(opts.headers || {})};
   if (token) headers.Authorization = `Bearer ${token}`;
   const r = await fetch(path, {...opts, headers});
+  if (r.status === 401 && !token) { location.replace("/login"); throw new Error("입장 비밀번호 필요"); }  // 입장 쿠키가 만료됨
   if (!r.ok && !opts.raw) throw new Error(`${r.status} ${await r.text()}`);
   return opts.raw ? r : r.json();
 }
@@ -659,7 +660,9 @@ $("#deleteAll").onclick = async () => {
 
 // ── 시작 ─────────────────────────────────────────────────────
 (async () => {
-  cfg = await (await fetch("/api/config")).json();
+  const cr = await fetch("/api/config");
+  if (cr.status === 401) { location.replace("/login"); return; }  // 입장 비밀번호를 아직 넣지 않음
+  cfg = await cr.json();
   options = cfg.options;
   if (!cfg.show_turn_panel) { $("#app").classList.add("no-panel"); $("#panel").hidden = true; }
   $("#photoBtn").hidden = !cfg.ocr_enabled;

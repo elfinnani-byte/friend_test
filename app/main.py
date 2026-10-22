@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, ocr, when
+from app import agent, gate, ocr, when
 from app.auth import Auth, User
 from app.config import ROOT, load_settings
 from app.llm import make_llm
@@ -43,10 +43,20 @@ if SLOW_START_SECONDS:
 
 
 @app.middleware("http")
+async def password_gate(request, call_next):
+    return await gate.gate(request, call_next)
+
+
+@app.middleware("http")
 async def not_ready_yet(request, call_next):
     if time.time() < READY_AT:
         return JSONResponse({"status": "starting"}, status_code=503)
     return await call_next(request)
+
+
+app.include_router(gate.router)
+if gate.enabled():
+    log("INFO", "입장 비밀번호가 켜져 있습니다.")
 
 
 def get_llm():
