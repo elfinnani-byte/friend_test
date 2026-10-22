@@ -176,6 +176,7 @@ def create_reminder(args, ctx):
     due, error = when.check_due(args.get("due_at"), now)
     if error:
         return ToolResult("create_reminder", False, f"약속을 저장하지 않았습니다: {error}")
+    due = due.replace(tzinfo=None)  # 저장 형식을 단순하게: 시간대 정보는 빼고 날짜와 시각만 남긴다
     reminder = ctx.store.add_reminder(ctx.user_id, text, due)
     local = due.astimezone(now.tzinfo)
     return ToolResult("create_reminder", True, f"약속을 저장했습니다: {when.label(local)}에 '{text}'.",
