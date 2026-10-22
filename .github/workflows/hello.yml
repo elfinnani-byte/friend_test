@@ -19,7 +19,6 @@ jobs:
           python3 --version
           echo "코드를 내려받기 전 파일 목록:"
           ls -a
-          exit 1
 
       - name: 저장소 코드 내려받기
         uses: actions/checkout@v7
