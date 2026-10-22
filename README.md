@@ -164,3 +164,5 @@ gcloud run deploy friend-agent --source . --region us-central1 --allow-unauthent
 | 공휴일 | [Nager.Date](https://date.nager.at/) | 키 없음 |
 
 공개 지오코딩 API는 한국어 지명을 잘못 찾는 경우가 있어서, 지원 도시 26곳의 좌표를 `app/tools.py` 에 직접 적어 두었습니다.
+
+이 저장소는 나니가 Cloud Run 배포 실습용으로 만들었다.
