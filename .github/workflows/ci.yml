@@ -1,0 +1,21 @@
+# PR이 올라오거나 staging, main 에 푸시되면 테스트를 돌린다. 테스트는 가짜 응답(fake)으로 돌아서 AI 비용이 들지 않는다.
+# 사용법: 이 파일을 .github/workflows/ci.yml 로 복사한다. 배포 워크플로는 이 검사가 통과해야 배포하도록 연결한다.
+name: ci
+
+on:
+  pull_request:
+  workflow_call:   # 배포 워크플로가 배포 전에 이 검사를 불러 쓴다
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest -q
