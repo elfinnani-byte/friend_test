@@ -40,7 +40,7 @@ jobs:
           env_vars: |
             COMMIT_SHA=${{ github.sha }}
             ENV=${{ vars.ENV }}
-          flags: --service-account=${{ vars.RUNTIME_SA }} --build-service-account=projects/${{ vars.GCP_PROJECT_ID }}/serviceAccounts/${{ vars.BUILD_SA }}
+          flags: --service-account=${{ vars.RUNTIME_SA }} --build-service-account=projects/${{ vars.GCP_PROJECT_ID }}/serviceAccounts/${{ vars.BUILD_SA }} --clear-base-image
 
       - name: 배포 주소
         run: echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
