@@ -1,0 +1,23 @@
+# 이미지에 넣지 않을 파일 목록이다. starter/dockerignore 를 바탕으로 했다.
+# 비밀값: 이미지에 들어가면 이미지를 받은 누구나 꺼내 볼 수 있다
+.env
+.env.*
+# 로컬 개발 환경과 기록
+.venv/
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/
+# 실행에 필요 없는 문서·테스트·실습 자료
+docs/
+hello/
+scripts/
+starter/
+supabase/
+tests/
+data/eval/
+data/samples/
+requirements-dev.txt
+pytest.ini
