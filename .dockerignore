@@ -6,8 +6,8 @@
 .venv/
 .git/
 .github/
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 .pytest_cache/
 .claude/
 # 실행에 필요 없는 문서·테스트·실습 자료
