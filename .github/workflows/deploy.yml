@@ -1,9 +1,10 @@
-# staging 브랜치에 푸시되면 staging 에, main 에 푸시되면 승인을 거쳐 production 에 배포한다. 배포 전에 ci.yml 검사를 먼저 돌린다.
-# 사용법: ci.yml 과 함께 .github/workflows/ 에 복사하고, 기존 deploy.yml 은 지운다.
-#   GitHub 저장소 Settings > Environments 에 staging, production 환경을 만들고,
-#   production 에는 Required reviewers(배포 승인자)를 건다.
-#   환경마다 Variables 에 SERVICE(friend-agent-staging / friend-agent), ENV(staging / production) 를 넣는다.
-#   저장소 공통 Variables: GCP_PROJECT_ID, WIF_PROVIDER, DEPLOY_SA, RUNTIME_SA
+# Actions 안에서 Dockerfile로 이미지를 만들고, 커밋 번호를 태그로 붙여 Artifact Registry에 올린 뒤 그 이미지로 배포한다.
+# 새 리비전은 트래픽 0%(태그 candidate)로 먼저 올리고, 태그 주소의 /health 를 확인한 뒤에만 100%로 전환한다.
+# 사용법: deploy-envs.yml 의 deploy 작업을 이 파일의 내용으로 바꾼다(테스트, 환경, 승인 구조는 그대로).
+#   저장소 공통 Variables 에 AR_REPO(예: us-central1-docker.pkg.dev/<프로젝트 ID>/friend-agent) 를 추가한다.
+#   배포용 서비스 계정에 Artifact Registry 저장소 하나에 대한 쓰기 권한(roles/artifactregistry.writer)을 추가한다(docs/wif-setup.md 5단계).
+#   전환 뒤 문제가 생기면 rollback.yml 을 수동 실행해 "이전 리비전" 단계에 남긴 리비전으로 되돌린다.
+# 배포용 이미지는 여기서만 만든다. 노트북에서 만든 이미지는 CPU 종류가 다를 수 있고, 누가 언제 만들었는지 기록이 남지 않는다.
 name: deploy
 
 on:
@@ -22,6 +23,10 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      IMAGE: ${{ vars.AR_REPO }}/friend-agent:${{ github.sha }}
+      SERVICE: ${{ vars.SERVICE }}
+      REGION: us-central1
     steps:
       - uses: actions/checkout@v7
 
@@ -30,17 +35,60 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.DEPLOY_SA }}
 
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: 이미지 만들기와 올리기
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
+
+      # 지금 트래픽을 받는 리비전을 기록해 둔다. 전환 뒤 문제가 생기면 이 리비전으로 되돌린다.
+      - name: 이전 리비전
+        id: previous
+        run: |
+          PREVIOUS=$(gcloud run services describe "$SERVICE" --region "$REGION" --format=json \
+            | jq -r '[.status.traffic[] | select(.percent > 0) | "\(.revisionName)=\(.percent)"] | join(",")')
+          echo "traffic=$PREVIOUS" >> "$GITHUB_OUTPUT"
+          echo "전환 전 트래픽: $PREVIOUS"
+
+      # 새 리비전을 트래픽 0%로 올리고 candidate 태그 주소를 붙인다. 사용자 요청은 아직 이전 리비전이 받는다.
       - id: deploy
         uses: google-github-actions/deploy-cloudrun@v3
         with:
           service: ${{ vars.SERVICE }}
           region: us-central1
           project_id: ${{ vars.GCP_PROJECT_ID }}
-          source: .
+          image: ${{ env.IMAGE }}
+          no_traffic: true
+          tag: candidate
           env_vars: |
             COMMIT_SHA=${{ github.sha }}
             ENV=${{ vars.ENV }}
-          flags: --service-account=${{ vars.RUNTIME_SA }} --build-service-account=projects/${{ vars.GCP_PROJECT_ID }}/serviceAccounts/${{ vars.BUILD_SA }} --clear-base-image
+          flags: --service-account=${{ vars.RUNTIME_SA }} --startup-probe=httpGet.path=/health,periodSeconds=5,failureThreshold=24,timeoutSeconds=2
 
-      - name: 배포 주소
-        run: echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
+      # candidate 태그 주소의 /health 가 200 이 아니면 여기서 작업을 실패로 끝낸다. 전환 단계는 실행되지 않는다.
+      - name: 스모크 테스트
+        run: |
+          URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format=json \
+            | jq -r '.status.traffic[] | select(.tag == "candidate") | .url')
+          echo "candidate 주소 $URL"
+          for i in $(seq 1 10); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$URL/health" || true)
+            echo "시도 $i: /health 응답 $CODE"
+            if [ "$CODE" = "200" ]; then exit 0; fi
+            sleep 6
+          done
+          echo "::error::candidate 리비전의 /health 가 200 이 아니어서 전환하지 않습니다."
+          exit 1
+
+      - name: 전환
+        run: |
+          echo "이전 리비전(롤백용): ${{ steps.previous.outputs.traffic }}"
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-tags candidate=100
+
+      - name: 배포 결과
+        run: |
+          echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
+          echo "배포한 이미지 $IMAGE"
+          echo "되돌리려면 rollback.yml 을 실행하고 revision 에 이전 리비전 이름을 넣는다: ${{ steps.previous.outputs.traffic }}"
