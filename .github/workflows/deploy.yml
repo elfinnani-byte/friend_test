@@ -28,16 +28,20 @@ jobs:
       SERVICE: ${{ vars.SERVICE }}
       REGION: us-central1
     steps:
-      - uses: actions/checkout@v7
+      - id: checkout
+        uses: actions/checkout@v7
 
-      - uses: google-github-actions/auth@v3
+      - id: auth
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.DEPLOY_SA }}
 
-      - uses: google-github-actions/setup-gcloud@v3
+      - id: setup_gcloud
+        uses: google-github-actions/setup-gcloud@v3
 
       - name: 이미지 만들기와 올리기
+        id: build
         run: |
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
           docker build --tag "$IMAGE" .
@@ -69,6 +73,7 @@ jobs:
 
       # candidate 태그 주소의 /health 가 200 이 아니면 여기서 작업을 실패로 끝낸다. 전환 단계는 실행되지 않는다.
       - name: 스모크 테스트
+        id: smoke
         run: |
           URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format=json \
             | jq -r '.status.traffic[] | select(.tag == "candidate") | .url')
@@ -83,12 +88,67 @@ jobs:
           exit 1
 
       - name: 전환
+        id: switch
         run: |
           echo "이전 리비전(롤백용): ${{ steps.previous.outputs.traffic }}"
           gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-tags candidate=100
 
       - name: 배포 결과
+        id: result
         run: |
           echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
           echo "배포한 이미지 $IMAGE"
           echo "되돌리려면 rollback.yml 을 실행하고 revision 에 이전 리비전 이름을 넣는다: ${{ steps.previous.outputs.traffic }}"
+
+      # 성공이든 실패든 Slack 으로 결과를 보낸다. 웹훅 주소는 시크릿으로만 넘기고 출력하지 않는다.
+      # 시크릿이 없거나 전송이 실패해도 알림만 건너뛰고 배포 결과는 바꾸지 않는다.
+      - name: Slack 알림
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TARGET_ENV: ${{ vars.ENV }}
+          JOB_STATUS: ${{ job.status }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OUTCOMES: |
+            checkout=${{ steps.checkout.outcome }}
+            auth=${{ steps.auth.outcome }}
+            setup-gcloud=${{ steps.setup_gcloud.outcome }}
+            이미지 만들기와 올리기=${{ steps.build.outcome }}
+            이전 리비전=${{ steps.previous.outcome }}
+            deploy-cloudrun=${{ steps.deploy.outcome }}
+            스모크 테스트=${{ steps.smoke.outcome }}
+            전환=${{ steps.switch.outcome }}
+            배포 결과=${{ steps.result.outcome }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL 시크릿이 없어 알림을 건너뜁니다."
+            exit 0
+          fi
+          case "$JOB_STATUS" in
+            success) HEAD="✅ 배포 성공" ;;
+            cancelled) HEAD="❌ 배포 취소" ;;
+            *) HEAD="❌ 배포 실패" ;;
+          esac
+          REVISION="없음"
+          if [ "$DEPLOY_OUTCOME" = "success" ]; then
+            REVISION=$(gcloud run services describe "$SERVICE" --region "$REGION" --format=json 2>/dev/null \
+              | jq -r '.status.traffic[] | select(.tag == "candidate") | .revisionName' || true)
+            REVISION=${REVISION:-확인 못 함}
+          fi
+          TEXT="[friend-agent · $TARGET_ENV] $HEAD
+          커밋: ${GITHUB_SHA::7}
+          새 리비전: $REVISION"
+          FAILED=$(printf '%s\n' "$OUTCOMES" | awk -F= '$2 == "failure" { print $1; exit }')
+          if [ -n "$FAILED" ]; then TEXT="$TEXT
+          실패한 단계: $FAILED"; fi
+          TEXT="$TEXT
+          실행: $RUN_URL"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' \
+            --data "$(jq -n --arg text "$TEXT" '{text: $text}')" "$SLACK_WEBHOOK_URL" || true)
+          if [ "$CODE" = "200" ]; then
+            echo "Slack 알림을 보냈습니다."
+          else
+            echo "Slack 알림 전송에 실패했습니다(응답 코드 $CODE). 배포 결과에는 영향이 없습니다."
+          fi
