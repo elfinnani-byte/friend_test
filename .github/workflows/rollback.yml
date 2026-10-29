@@ -1,0 +1,58 @@
+# 지정한 리비전으로 트래픽 100%를 되돌린다. 이미지를 다시 만들거나 배포하지 않고 트래픽만 옮긴다.
+# 사용법: Actions 탭 > rollback > Run workflow 에서 환경과 리비전 이름을 넣는다.
+#   리비전 이름은 deploy 실행의 "이전 리비전" 단계 로그에 남아 있다.
+#   production 을 고르면 production 환경의 배포 승인을 거친다.
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 되돌릴 환경
+        type: choice
+        options: [staging, production]
+        required: true
+      revision:
+        description: 되돌릴 리비전 이름 (예 friend-agent-staging-00014-jbd)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      SERVICE: ${{ vars.SERVICE }}
+      REGION: us-central1
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # 다른 서비스의 리비전이나 없는 리비전을 넣었으면 트래픽을 건드리기 전에 멈춘다.
+      - name: 리비전 확인
+        run: |
+          case "$REVISION" in
+            "$SERVICE"-*) ;;
+            *) echo "::error::$REVISION 은 $SERVICE 서비스의 리비전 이름이 아닙니다."; exit 1 ;;
+          esac
+          gcloud run revisions describe "$REVISION" --region "$REGION" --format='value(metadata.name)'
+          echo "되돌리기 전 트래픽:"
+          gcloud run services describe "$SERVICE" --region "$REGION" --format=json \
+            | jq -r '.status.traffic[] | select(.percent > 0) | "\(.revisionName)=\(.percent)"'
+
+      - name: 되돌리기
+        run: gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-revisions "$REVISION=100"
+
+      - name: 결과
+        run: |
+          gcloud run services describe "$SERVICE" --region "$REGION" --format=json \
+            | jq -r '.status.traffic[] | select(.percent > 0) | "\(.revisionName)=\(.percent)"'
