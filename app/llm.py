@@ -75,7 +75,10 @@ class ClaudeLLM:
     def __init__(self, api_key, model):
         import anthropic
 
-        self.client = anthropic.Anthropic(api_key=api_key, timeout=60)
+        # SDK 자체 OpenTelemetry 계측을 끈다. 켜 두면 Langfuse가 등록한 전역 provider로 anthropic.messages.create span이
+        # 나가서, tracing.record 로 남기는 generation 과 같은 토큰·비용이 한 번 더 잡힌다.
+        # https://platform.claude.com/docs/en/manage-claude/opentelemetry/sdk
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=60, open_telemetry=False)
         self.model = model
 
     @staticmethod

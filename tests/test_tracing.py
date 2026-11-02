@@ -4,12 +4,14 @@ import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
+import anthropic
+import httpx2
 import pytest
 from langfuse import Langfuse
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from app import agent, memory, tracing
-from app.llm import FakeLLM
+from app.llm import ClaudeLLM, FakeLLM
 from app.store.memory_store import MemoryStore
 
 PII = "제 번호는 010-1234-5678, 메일은 jisu.kim@example.com, 카드는 4111 1111 1111 1111 이에요"
@@ -176,3 +178,46 @@ def test_greeting_attributes(exported):
     assert a["langfuse.trace.metadata.tools"] == "[]"
     assert a["langfuse.trace.metadata.safety"] == "false"
     assert a["langfuse.trace.metadata.commit"] == '"local"'
+
+
+# ── Anthropic SDK 자체 계측 ─────────────────────────────────────────────
+
+def fake_claude_api(request):
+    """Messages API 대신 고정 응답을 돌려준다. 실제 호출과 비용이 없다."""
+    return httpx2.Response(200, json={
+        "id": "msg_test", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+        "content": [{"type": "text", "text": "안녕"}], "stop_reason": "end_turn", "stop_sequence": None,
+        "usage": {"input_tokens": 10, "output_tokens": 3}})
+
+
+def fake_http_client():
+    return httpx2.Client(transport=httpx2.MockTransport(fake_claude_api))
+
+
+def sdk_spans(exporter):
+    tracing.client().flush()
+    return [s for s in exporter.get_finished_spans()
+            if s.name.startswith("anthropic.") or s.instrumentation_scope.name == "com.anthropic.sdk.python"]
+
+
+def test_claude_client_turns_off_sdk_tracing():
+    llm = ClaudeLLM("test-key", "claude-haiku-5-5")
+    assert llm.client.open_telemetry["traces"]["enabled"] is False
+
+
+def test_claude_call_exports_only_our_generation(exported):
+    llm = ClaudeLLM("test-key", "claude-haiku-5-5")
+    llm.client = llm.client.with_options(http_client=fake_http_client())  # 복사본도 꺼진 설정을 물려받는다
+    with tracing.observe("choose-tools", "generation", model=llm.model):
+        llm.complete_text([{"role": "user", "content": "안녕"}])
+    assert sdk_spans(exported) == []
+    spans = spans_by_name(exported)
+    assert spans["choose-tools"].attributes["langfuse.observation.model.name"] == "claude-haiku-5-5"
+    assert json.loads(spans["choose-tools"].attributes["langfuse.observation.usage_details"]) == {"input": 10, "output": 3}
+
+
+def test_default_anthropic_client_would_export_sdk_span(exported):
+    # 대조군: 계측을 끄지 않은 기본 클라이언트는 span을 내보낸다. 위 테스트가 우연히 통과하지 않음을 보장한다
+    client = anthropic.Anthropic(api_key="test-key", http_client=fake_http_client())
+    client.beta.messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[{"role": "user", "content": "안녕"}])
+    assert [s.name for s in sdk_spans(exported)] == ["anthropic.messages.create"]
