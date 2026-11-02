@@ -208,6 +208,37 @@ def flush():
     ok = False
     try:
         ok = bool((_provider or otel_trace.get_tracer_provider()).force_flush())
+        client().flush()  # 점수(create_score)는 따로 쌓이므로 그 대기열도 보낸다
     except Exception:
         ok = False
     log("INFO", "Langfuse flush", ms=round((time.perf_counter() - started) * 1000), ok=ok)
+
+
+def trace_id(observation):
+    """계측이 켜져 있을 때만 관찰의 트레이스 ID. 메시지 meta 에 저장해 두었다가 사용자 반응을 그 트레이스에 잇는다."""
+    return observation.trace_id if _enabled else None
+
+
+def link(meta, observation):
+    """답 메시지 meta 에 트레이스 ID 를 더한다. 계측이 꺼져 있으면 그대로 둔다."""
+    trace = trace_id(observation)
+    return {**meta, "trace_id": trace} if trace else meta
+
+
+def score(name, value, trace, comment=None):
+    """BOOLEAN 점수(0 또는 1) 하나를 트레이스에 붙여 보낸다. 보냈으면 True.
+
+    계측이 꺼져 있거나 트레이스 ID 가 없으면 건너뛴다. 실패해도 응답을 깨지 않는다.
+    score_id 를 트레이스와 이름으로 고정해, 같은 답에 다시 누르면 새로 쌓지 않고 덮어쓴다.
+    comment 는 사용자가 쓴 문장일 수 있어 전화번호, 이메일, 카드 번호를 가리고 500자로 자른다.
+    https://langfuse.com/docs/evaluation/evaluation-methods/scores-via-sdk
+    """
+    if not _enabled or not trace:
+        return False
+    try:
+        client().create_score(name=name, value=value, trace_id=trace, score_id=f"{trace}-{name}",
+                              data_type="BOOLEAN", comment=mask_text(comment)[:500] if comment else None)
+    except Exception:
+        return False
+    flush()
+    return True

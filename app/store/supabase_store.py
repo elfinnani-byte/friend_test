@@ -78,6 +78,11 @@ class SupabaseStore:
         rows = self._get("messages", user_id=f"eq.{uid}", order="id.desc", limit=limit)
         return [self._message(r) for r in reversed(rows)]
 
+    def get_message(self, uid, message_id):
+        """이 사용자의 메시지만 찾는다. 남의 메시지 ID면 None."""
+        rows = self._get("messages", user_id=f"eq.{uid}", id=f"eq.{int(message_id)}")
+        return self._message(rows[0]) if rows else None
+
     def messages_after(self, uid, after_id):
         rows = self._get("messages", user_id=f"eq.{uid}", id=f"gt.{after_id or 0}", order="id.asc")
         return [self._message(r) for r in rows]

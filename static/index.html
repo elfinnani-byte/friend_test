@@ -81,6 +81,9 @@ body.has-banner .app{height:calc(100dvh - 32px)}
 .note.busy{color:var(--ink-3)}
 .report{font-size:12px;color:var(--ink-3);background:none;border:0;padding:2px 4px;opacity:0;transition:opacity .15s}
 .row.them:hover .report{opacity:1}
+.fb{font-size:13px;background:none;border:0;padding:2px 3px;opacity:0;filter:grayscale(1);transition:opacity .15s}
+.row.them:hover .fb{opacity:.7}
+.fb.on{opacity:1!important;filter:none}
 .day{align-self:center;font-size:12px;color:var(--ink-3);background:var(--surface-2);border:1px solid var(--line);padding:2px 10px;border-radius:999px}
 
 .composer{padding:10px 24px 18px}
@@ -389,13 +392,31 @@ function addRow(role, text, opts = {}) {
   if (role === "user") row.innerHTML = `<div class="bubble"></div>`;
   else row.innerHTML = `<div class="ava">${character.avatar}</div><div class="bubble${opts.safety ? " safety" : ""}"></div>${opts.id ? `<button class="report" title="부적절한 답변 신고">신고</button>` : ""}`;
   row.querySelector(".bubble").textContent = text;
-  if (opts.id) bindReport(row, opts.id);
+  if (opts.id) bindReplyActions(row, opts.id);
   thread.appendChild(row);
   const under = document.createElement("div");
   under.className = "under";
   thread.appendChild(under);
   scroll();
   return {row, bubble: row.querySelector(".bubble"), under};
+}
+function bindReplyActions(row, id) {
+  bindFeedback(row, id);
+  bindReport(row, id);
+}
+// 좋아요(👍)/별로예요(👎). 서버가 내 답인지 확인하고 Langfuse 점수 user-feedback 으로 보낸다. 다시 누르면 바꿀 수 있다
+function bindFeedback(row, id) {
+  if (row.querySelector(".fb")) return;
+  const report = row.querySelector(".report");
+  for (const [liked, icon, label] of [[true, "👍", "좋아요"], [false, "👎", "별로예요"]]) {
+    const btn = document.createElement("button");
+    btn.className = "fb"; btn.textContent = icon; btn.title = label; btn.setAttribute("aria-label", label);
+    btn.onclick = async () => {
+      await api("/api/feedback", {method: "POST", body: JSON.stringify({message_id: id, liked})});
+      row.querySelectorAll(".fb").forEach(b => b.classList.toggle("on", b === btn));
+    };
+    row.insertBefore(btn, report);
+  }
 }
 function bindReport(row, id) {
   let btn = row.querySelector(".report");
@@ -471,7 +492,7 @@ async function send(text) {
           panel?.memory(e);
           refreshCount();
         }
-        else if (e.type === "done") { finished = true; bubble.textContent = reply || bubble.textContent; bindReport(row, e.message_id); }
+        else if (e.type === "done") { finished = true; bubble.textContent = reply || bubble.textContent; bindReplyActions(row, e.message_id); }
         else if (e.type === "error") { finished = true; bubble.textContent = e.message; }
       }
     }
