@@ -26,6 +26,8 @@ from zoneinfo import ZoneInfo
 from langfuse import Langfuse, propagate_attributes
 from langfuse.types import MaskOtelSpansResult, OtelSpanPatch
 from opentelemetry import trace as otel_trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
 from app.logs import log
 
@@ -42,6 +44,7 @@ KST = ZoneInfo("Asia/Seoul")
 
 _client = None
 _enabled = False  # setup 에서 키가 있어 계측을 켰는지
+_provider = None  # setup 에서 만든 tracer provider. flush 가 이것을 비운다
 _version = "local"  # Cloud Run 리비전(K_REVISION). setup 에서 정한다
 _commit = "local"   # COMMIT_SHA
 
@@ -92,10 +95,16 @@ def mask_pii(*, params):
 def setup(settings):
     """앱 시작 때 한 번 부른다. .env 를 읽은 뒤(load_settings 뒤)에 불러야 키를 찾는다.
     environment 는 서비스 단위 값이라 클라이언트에 넣는다(ENV: local, staging, production)."""
-    global _client, _enabled, _version, _commit
+    global _client, _enabled, _provider, _version, _commit
     _version, _commit = settings.revision, settings.commit
     enabled = bool(os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip() and os.environ.get("LANGFUSE_SECRET_KEY", "").strip())
-    _client = Langfuse(environment=settings.env, mask_otel_spans=mask_pii) if enabled else disabled_client()
+    if enabled:
+        provider = _provider = make_provider()
+        if isinstance(otel_trace.get_tracer_provider(), otel_trace.ProxyTracerProvider):
+            otel_trace.set_tracer_provider(provider)  # FastAPI 요청 span 도 같은 provider 를 쓰게 한다
+        _client = Langfuse(environment=settings.env, mask_otel_spans=mask_pii, tracer_provider=provider)
+    else:
+        _client = disabled_client()
     _enabled = enabled
     log("INFO", "Langfuse 계측", enabled=enabled)
     return _client
@@ -125,6 +134,17 @@ class Attributes:
         with propagate_attributes(user_id=self.user_id, session_id=self.session_id, version=_version,
                                   metadata=dict(self.metadata), tags=list(self.tags) or None):
             yield
+
+
+def make_provider():
+    """모든 트레이스를 기록하는 tracer provider.
+
+    Cloud Run 앞단은 요청마다 traceparent 헤더를 붙이고 일부에만 '샘플함' 표시를 켠다. FastAPI 가 그 헤더를 이어받고,
+    OpenTelemetry 기본 샘플러 ParentBased(ALWAYS_ON) 는 원격 부모가 '샘플 안 함'이면 기록하지 않아 트레이스가 빠졌다.
+    ALWAYS_ON 은 부모의 표시와 상관없이 기록한다. 트레이스 ID 는 부모를 이어받으므로 Cloud Run trace ID 와 같다.
+    https://langfuse.com/docs/observability/sdk/advanced-features (Langfuse respects OpenTelemetry's sampling decisions)
+    """
+    return TracerProvider(sampler=ALWAYS_ON)
 
 
 def disabled_client():
@@ -179,7 +199,7 @@ def flush():
     """Cloud Run 은 응답이 끝나면 CPU를 거의 주지 않아서, 응답을 닫기 전에 쌓인 관찰을 보낸다.
 
     계측이 꺼져 있으면 아무것도 하지 않는다. 켜져 있으면 걸린 시간(ms)과 성공 여부(ok)만 로그에 남긴다.
-    Langfuse.flush() 는 성공 여부를 돌려주지 않아서, Langfuse가 등록한 전역 provider 의 force_flush() 를 직접 부른다.
+    Langfuse.flush() 는 성공 여부를 돌려주지 않아서, setup 에서 만든 provider 의 force_flush() 를 직접 부른다.
     실패해도 응답을 깨지 않도록 예외는 ok=false 로만 남긴다(오류 내용은 남기지 않는다).
     """
     if not _enabled:
@@ -187,7 +207,7 @@ def flush():
     started = time.perf_counter()
     ok = False
     try:
-        ok = bool(otel_trace.get_tracer_provider().force_flush())
+        ok = bool((_provider or otel_trace.get_tracer_provider()).force_flush())
     except Exception:
         ok = False
     log("INFO", "Langfuse flush", ms=round((time.perf_counter() - started) * 1000), ok=ok)
