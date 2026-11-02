@@ -254,3 +254,42 @@ def test_flush_log_after_turn_has_no_message_text(exported, monkeypatch, capsys)
     line = json.dumps(records, ensure_ascii=False)
     for secret in ("비밀메모XY", "010-1234-5678", "jisu.kim@example.com", "pk-lf-", "sk-lf-"):
         assert secret not in line
+
+
+# ── 샘플링: Cloud Run 이 붙이는 traceparent 의 '샘플 안 함' 표시 ─────────────
+
+UNSAMPLED_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00"  # 끝의 00 = 샘플 안 함
+
+
+def turn_spans_under_unsampled_parent(provider):
+    """'샘플 안 함' 원격 부모 문맥 안에서 대화 한 턴을 돌리고, Langfuse로 나갈 span 을 돌려준다."""
+    from opentelemetry.context import attach, detach
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+    exporter = InMemorySpanExporter()
+    previous = tracing._client
+    key = uuid.uuid4().hex
+    tracing._client = Langfuse(public_key=f"pk-lf-{key}", secret_key=f"sk-lf-{key}", base_url="http://localhost:1",
+                               environment="test", span_exporter=exporter, tracer_provider=provider)
+    token = attach(TraceContextTextMapPropagator().extract({"traceparent": UNSAMPLED_TRACEPARENT}))
+    try:
+        list(agent.run_turn("오늘 기분 좋아", "user-abc", FakeLLM(delay=0), MemoryStore(), show_panel=False))
+    finally:
+        detach(token)
+        tracing._client.flush()
+        tracing._client = previous
+    return exporter.get_finished_spans()
+
+
+def test_turn_is_recorded_even_if_remote_parent_is_not_sampled():
+    spans = turn_spans_under_unsampled_parent(tracing.make_provider())
+    names = {s.name for s in spans}
+    assert {"chat-turn", "safety", "choose-tools", "reply", "memory-update"} <= names
+    # 트레이스 ID 는 들어온 traceparent 를 그대로 잇는다(Cloud Run trace ID 와 같다)
+    assert {format(s.context.trace_id, "032x") for s in spans} == {"0af7651916cd43dd8448eb211c80319c"}
+
+
+def test_default_sampler_drops_turn_under_unsampled_parent():
+    # 대조군: 기본 샘플러(ParentBased)는 원격 부모가 '샘플 안 함'이면 아무것도 기록하지 않는다(staging 에서 빠진 원인)
+    from opentelemetry.sdk.trace import TracerProvider
+    assert turn_spans_under_unsampled_parent(TracerProvider()) == ()
