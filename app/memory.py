@@ -6,7 +6,7 @@
 """
 import re
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.safety import is_sensitive
 
@@ -112,7 +112,7 @@ def update_memories(store, uid, user_message, reply, now, llm):
     return changes
 
 
-def maybe_summarize(store, uid, llm):
+def maybe_summarize(store, uid, llm, parent=None):
     """요약되지 않은 메시지가 많으면 앞쪽을 요약에 합친다. 요약했으면 True."""
     summary = store.get_summary(uid)
     pending = store.messages_after(uid, summary["covers_until"] if summary else 0)
@@ -121,11 +121,15 @@ def maybe_summarize(store, uid, llm):
     batch = pending[:SUMMARIZE_BATCH]
     talk = "\n".join(f"{m['role']}: {m['content']}" for m in batch)
     previous = f"[기존 요약]\n{summary['text']}\n\n" if summary else ""
-    if getattr(llm, "can_reason", False):
-        text = llm.complete_text([{"role": "system", "content": SUMMARY_PROMPT},
-                                  {"role": "user", "content": f"{previous}[대화]\n{talk}"}])
-    else:
-        text = ((summary["text"] + " ") if summary else "") + f"메시지 {len(batch)}개를 주고받았다."
+    # 요약할 때만 memory-summary 관찰이 생긴다. 모델이 요약하면 그 호출이 여기에 기록된다.
+    with tracing.observe("memory-summary", "generation", parent=parent, model=llm.model,
+                         input=f"{previous}[대화]\n{talk}") as observation:
+        if getattr(llm, "can_reason", False):
+            text = llm.complete_text([{"role": "system", "content": SUMMARY_PROMPT},
+                                      {"role": "user", "content": f"{previous}[대화]\n{talk}"}])
+        else:
+            text = ((summary["text"] + " ") if summary else "") + f"메시지 {len(batch)}개를 주고받았다."
+        observation.update(output=text)
     store.save_summary(uid, text[:2000], batch[-1]["id"])
     log("INFO", "대화 요약 갱신", covered=len(batch))
     return True

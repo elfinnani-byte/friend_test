@@ -9,10 +9,11 @@
    응답 뒤 백그라운드로 돌리면 기억 정리가 멈추거나 늦어진다. 그래서 응답을 닫기 전에 처리한다.
 
 결과는 이벤트(dict)로 하나씩 내보낸다. show_panel 이 꺼져 있으면(production) 개발용 이벤트는 아예 만들지 않는다.
+한 턴은 Langfuse 트레이스 chat-turn 하나로 남고, ①~⑤가 그 아래 관찰이 된다(tracing.py).
 """
 from datetime import timedelta
 
-from app import memory, when
+from app import memory, tracing, when
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, build_persona
 from app.router import choose
@@ -36,6 +37,26 @@ def system_prompt(character, now, location, memories, summary, tool_lines=(), cl
 
 
 def run_turn(message, uid, llm, store, show_panel):
+    attrs = tracing.Attributes(uid)
+    with attrs.scope():
+        turn = tracing.start("chat-turn", input=message)
+    reply = []
+    try:
+        for event in _run_turn(message, uid, llm, store, show_panel, turn, attrs):
+            if event["type"] == "delta":
+                reply.append(event["text"])
+            yield event
+    except Exception as error:
+        turn.update(level="ERROR", status_message=type(error).__name__)
+        raise
+    finally:  # 중간에 연결이 끊겨도(GeneratorExit) 트레이스를 닫고 보낸다
+        # 루트는 도구 선택 전에 만들어져 전파된 metadata 가 없으므로 끝에 최종 값을 적는다(태그는 바꿀 수 없다)
+        turn.update(output="".join(reply), metadata=attrs.metadata)
+        turn.end()
+        tracing.flush()
+
+
+def _run_turn(message, uid, llm, store, show_panel, turn, attrs):
     settings = store.get_settings(uid)
     character = store.get_character(uid) or DEFAULT_CHARACTER
     now = when.now_in(settings["timezone"])
@@ -43,8 +64,13 @@ def run_turn(message, uid, llm, store, show_panel):
     history = [{"role": m["role"], "content": m["content"]} for m in recent]
     store.add_message(uid, "user", message)
 
-    # ① 위기 표현
-    if is_crisis(message):
+    # ① 위기 표현. 태그는 관찰을 만들 때만 붙으므로, 판정을 먼저 하고 safety 관찰을 연다
+    crisis = is_crisis(message)
+    attrs.add({"safety": crisis}, ["safety"] if crisis else ())
+    with attrs.scope(), tracing.observe("safety", parent=turn, input=message) as observation:
+        observation.update(output={"crisis": crisis})
+    if crisis:
+        attrs.add({"tools": []})
         guards = ["위기 표현이 있어 캐릭터 설정과 상관없이 정해진 안전 응답을 보냈습니다."]
         if show_panel:
             yield {"type": "turn", "tools": [], "confidence": None, "reason": "", "decided_by": "rule",
@@ -55,8 +81,14 @@ def run_turn(message, uid, llm, store, show_panel):
         yield {"type": "done", "message_id": saved["id"]}
         return
 
-    # ② 도구 선택
-    choice = choose(message, history, now, settings["location"], llm)
+    # ② 도구 선택. 모델이 고르면 그 호출이 이 generation 에 기록되고, 규칙으로 고르면 입력 메시지와 결과만 남는다.
+    with attrs.scope(), tracing.observe("choose-tools", "generation", parent=turn, model=llm.model,
+                                        input=message) as observation:
+        choice = choose(message, history, now, settings["location"], llm)
+        picked = {"tools": [t["name"] for t in choice.tools], "confidence": round(choice.confidence, 2),
+                  "decided_by": choice.decided_by}
+        observation.update(output={**picked, "action": choice.action, "guards": choice.guards}, metadata=picked)
+    attrs.add({"tools": picked["tools"], "confidence": picked["confidence"]}, picked["tools"])
     if show_panel:
         yield {"type": "turn", "tools": [{"name": t["name"], "label": TOOLS[t["name"]]["label"], "args": t["args"]}
                                          for t in choice.tools],
@@ -65,7 +97,12 @@ def run_turn(message, uid, llm, store, show_panel):
 
     # ③ 도구 실행
     ctx = Context(store, uid, settings["location"], settings["timezone"])
-    results = [run_tool(t["name"], t["args"], ctx) for t in choice.tools]
+    results = []
+    for t in choice.tools:
+        with attrs.scope(), tracing.observe(f"tool:{t['name']}", parent=turn, input=t["args"]) as observation:
+            r = run_tool(t["name"], t["args"], ctx)
+            observation.update(output=r.summary, metadata={"ok": r.ok}, level=None if r.ok else "WARNING")
+        results.append(r)
     for r in results:
         if show_panel:
             yield {"type": "tool", "name": r.name, "label": TOOLS[r.name]["label"], "ok": r.ok,
@@ -80,17 +117,27 @@ def run_turn(message, uid, llm, store, show_panel):
         yield {"type": "context", "memories": [m["text"] for m in memories],
                "summary": summary["text"] if summary else None, "recent_messages": len(history)}
     reply = ""
-    for chunk in llm.chat_stream([{"role": "system", "content": system}, *history, {"role": "user", "content": message}]):
-        reply += chunk
-        yield {"type": "delta", "text": chunk}
+    with attrs.scope():
+        generation = tracing.start("reply", "generation", parent=turn, model=llm.model)
+    try:
+        for chunk in llm.chat_stream([{"role": "system", "content": system}, *history, {"role": "user", "content": message}],
+                                     observation=generation):
+            reply += chunk
+            yield {"type": "delta", "text": chunk}
+    finally:
+        generation.end()
     meta = {"tools": [t["name"] for t in choice.tools], "confidence": choice.confidence,
             "action": choice.action, "guards": choice.guards}
     saved = store.add_message(uid, "assistant", reply, meta)
 
     # ⑤ 기억 정리
     yield {"type": "memory_start"}
-    changes = memory.update_memories(store, uid, message, reply, now, llm)
-    memory.maybe_summarize(store, uid, llm)
+    with attrs.scope(), tracing.observe("memory-update", "generation", parent=turn, model=llm.model,
+                                        input={"user": message, "assistant": reply}) as observation:
+        changes = memory.update_memories(store, uid, message, reply, now, llm)
+        observation.update(output={kind: [m["text"] for m in items] for kind, items in changes.items()})
+    with attrs.scope():
+        memory.maybe_summarize(store, uid, llm, parent=turn)
     yield {"type": "memory", "added": [m["text"] for m in changes["added"]],
            "updated": [m["text"] for m in changes["updated"]], "removed": [m["text"] for m in changes["removed"]]}
     yield {"type": "done", "message_id": saved["id"]}
@@ -118,8 +165,13 @@ def greet(uid, llm, store):
     if not last:
         guide.append("처음 만난 사이다. 이름을 넣어 짧게 자기소개를 한다.")
     system += "\n\n[먼저 말 걸기]\n" + " ".join(guide)
-    text = llm.complete_text([{"role": "system", "content": system},
-                              {"role": "user", "content": "(앱을 열었다. 먼저 말을 걸어 줘)"}])
+    attrs = tracing.Attributes(uid)
+    attrs.add({"tools": [], "safety": False})  # 먼저 말 걸기는 도구를 고르지 않고 안전 응답도 없다
+    with attrs.scope(), tracing.observe("greeting", "generation", model=llm.model) as observation:
+        text = llm.complete_text([{"role": "system", "content": system},
+                                  {"role": "user", "content": "(앱을 열었다. 먼저 말을 걸어 줘)"}])
+        observation.update(metadata={"reminders": len(due), "first_meeting": not last})
+    tracing.flush()
     saved = store.add_message(uid, "assistant", text, {"action": "greeting", "reminders": [r["id"] for r in due]})
     log("INFO", "먼저 말 걸기", reminders=len(due))
     return {"id": saved["id"], "text": text, "reminders": [r["text"] for r in due]}

@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, gate, ocr, when
+from app import agent, gate, ocr, tracing, when
 from app.auth import Auth, User
 from app.config import ROOT, load_settings
 from app.llm import make_llm
@@ -28,6 +28,7 @@ from app.store.base import make_store
 from app.tools import CITIES
 
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
+tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는다. 키가 없으면 꺼진다
 llm = make_llm(settings)
 store = make_store(settings)
 current_user = Auth(settings)
