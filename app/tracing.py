@@ -18,12 +18,14 @@
 import json
 import os
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from langfuse import Langfuse, propagate_attributes
 from langfuse.types import MaskOtelSpansResult, OtelSpanPatch
+from opentelemetry import trace as otel_trace
 
 from app.logs import log
 
@@ -39,6 +41,7 @@ PII_PATTERNS = [
 KST = ZoneInfo("Asia/Seoul")
 
 _client = None
+_enabled = False  # setup 에서 키가 있어 계측을 켰는지
 _version = "local"  # Cloud Run 리비전(K_REVISION). setup 에서 정한다
 _commit = "local"   # COMMIT_SHA
 
@@ -89,10 +92,11 @@ def mask_pii(*, params):
 def setup(settings):
     """앱 시작 때 한 번 부른다. .env 를 읽은 뒤(load_settings 뒤)에 불러야 키를 찾는다.
     environment 는 서비스 단위 값이라 클라이언트에 넣는다(ENV: local, staging, production)."""
-    global _client, _version, _commit
+    global _client, _enabled, _version, _commit
     _version, _commit = settings.revision, settings.commit
     enabled = bool(os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip() and os.environ.get("LANGFUSE_SECRET_KEY", "").strip())
     _client = Langfuse(environment=settings.env, mask_otel_spans=mask_pii) if enabled else disabled_client()
+    _enabled = enabled
     log("INFO", "Langfuse 계측", enabled=enabled)
     return _client
 
@@ -172,5 +176,18 @@ def mark_first_token(observation):
 
 
 def flush():
-    """Cloud Run 은 응답이 끝나면 CPU를 거의 주지 않아서, 응답을 닫기 전에 쌓인 관찰을 보낸다."""
-    client().flush()
+    """Cloud Run 은 응답이 끝나면 CPU를 거의 주지 않아서, 응답을 닫기 전에 쌓인 관찰을 보낸다.
+
+    계측이 꺼져 있으면 아무것도 하지 않는다. 켜져 있으면 걸린 시간(ms)과 성공 여부(ok)만 로그에 남긴다.
+    Langfuse.flush() 는 성공 여부를 돌려주지 않아서, Langfuse가 등록한 전역 provider 의 force_flush() 를 직접 부른다.
+    실패해도 응답을 깨지 않도록 예외는 ok=false 로만 남긴다(오류 내용은 남기지 않는다).
+    """
+    if not _enabled:
+        return
+    started = time.perf_counter()
+    ok = False
+    try:
+        ok = bool(otel_trace.get_tracer_provider().force_flush())
+    except Exception:
+        ok = False
+    log("INFO", "Langfuse flush", ms=round((time.perf_counter() - started) * 1000), ok=ok)

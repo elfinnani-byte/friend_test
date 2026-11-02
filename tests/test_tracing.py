@@ -221,3 +221,36 @@ def test_default_anthropic_client_would_export_sdk_span(exported):
     client = anthropic.Anthropic(api_key="test-key", http_client=fake_http_client())
     client.beta.messages.create(model="claude-haiku-5-5", max_tokens=10, messages=[{"role": "user", "content": "안녕"}])
     assert [s.name for s in sdk_spans(exported)] == ["anthropic.messages.create"]
+
+
+# ── flush 로그 ──────────────────────────────────────────────────────────
+
+def flush_logs(captured):
+    return [json.loads(line) for line in captured.splitlines() if '"Langfuse flush"' in line]
+
+
+def test_flush_does_nothing_when_tracing_is_off(monkeypatch, capsys):
+    monkeypatch.setattr(tracing, "_enabled", False)
+    tracing.flush()
+    assert flush_logs(capsys.readouterr().out) == []
+
+
+def test_flush_logs_only_time_and_success(exported, monkeypatch, capsys):
+    monkeypatch.setattr(tracing, "_enabled", True)
+    with tracing.observe("safety"):
+        pass
+    tracing.flush()
+    [record] = flush_logs(capsys.readouterr().out)
+    assert set(record) == {"severity", "message", "ms", "ok"}
+    assert record["ok"] is True and isinstance(record["ms"], int)
+
+
+def test_flush_log_after_turn_has_no_message_text(exported, monkeypatch, capsys):
+    monkeypatch.setattr(tracing, "_enabled", True)
+    list(agent.run_turn(f"{PII} 비밀메모XY", "user-abc", FakeLLM(delay=0), MemoryStore(), show_panel=False))
+    out = capsys.readouterr().out
+    records = flush_logs(out)
+    assert len(records) == 1 and records[0]["ok"] is True  # 턴이 끝날 때 한 번 flush 한다
+    line = json.dumps(records, ensure_ascii=False)
+    for secret in ("비밀메모XY", "010-1234-5678", "jisu.kim@example.com", "pk-lf-", "sk-lf-"):
+        assert secret not in line
