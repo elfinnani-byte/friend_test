@@ -79,6 +79,11 @@ class ReportRequest(BaseModel):
     reason: str = ""
 
 
+class FeedbackRequest(BaseModel):
+    message_id: int
+    liked: bool  # 좋아요 true, 별로예요 false
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     page = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -196,11 +201,31 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
         raise HTTPException(500, str(error)) from error
 
 
+def own_reply(user, message_id):
+    """로그인한 사용자의 답(assistant) 메시지만 돌려준다. 남의 메시지나 없는 메시지면 None."""
+    message = store.get_message(user.id, message_id)
+    return message if message and message["role"] == "assistant" else None
+
+
 @app.post("/api/report")
 def report(req: ReportRequest, user: User = Depends(current_user)):
-    # 지금은 로그로만 남긴다. 관측 도구를 붙이면 그 도구의 점수로 보낸다.
     log("WARNING", "부적절한 답변 신고", message_id=req.message_id, reason_length=len(req.reason))
+    # 응답은 지금처럼 늘 ok. 내 답 메시지일 때만 Langfuse 점수(report=1)를 보낸다. 사유는 comment 로
+    message = own_reply(user, req.message_id)
+    if message:
+        tracing.score("report", 1, message["meta"].get("trace_id"), comment=req.reason.strip() or None)
     return {"ok": True}
+
+
+@app.post("/api/feedback")
+def feedback(req: FeedbackRequest, user: User = Depends(current_user)):
+    """답 말풍선의 좋아요(1)/별로예요(0)를 Langfuse 점수 user-feedback 으로 보낸다."""
+    message = own_reply(user, req.message_id)
+    if not message:
+        raise HTTPException(404, "메시지를 찾을 수 없습니다")
+    scored = tracing.score("user-feedback", 1 if req.liked else 0, message["meta"].get("trace_id"))
+    log("INFO", "사용자 반응", message_id=req.message_id, liked=req.liked, scored=scored)
+    return {"ok": True, "scored": scored}
 
 
 # ── 기억, 약속, 내 데이터 ───────────────────────────────────────────

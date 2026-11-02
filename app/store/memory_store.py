@@ -50,6 +50,10 @@ class MemoryStore:
     def recent_messages(self, uid, limit):
         return list(self._user(uid)["messages"][-limit:])
 
+    def get_message(self, uid, message_id):
+        """이 사용자의 메시지만 찾는다. 남의 메시지 ID면 None."""
+        return next((dict(m) for m in self._user(uid)["messages"] if m["id"] == message_id), None)
+
     def messages_after(self, uid, after_id):
         return [m for m in self._user(uid)["messages"] if m["id"] > (after_id or 0)]
 

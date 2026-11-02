@@ -76,7 +76,7 @@ def _run_turn(message, uid, llm, store, show_panel, turn, attrs):
             yield {"type": "turn", "tools": [], "confidence": None, "reason": "", "decided_by": "rule",
                    "action": "safety", "guards": guards}
         yield {"type": "delta", "text": CRISIS_REPLY}
-        saved = store.add_message(uid, "assistant", CRISIS_REPLY, {"action": "safety", "guards": guards})
+        saved = store.add_message(uid, "assistant", CRISIS_REPLY, tracing.link({"action": "safety", "guards": guards}, turn))
         log("WARNING", "위기 표현 안전 응답")
         yield {"type": "done", "message_id": saved["id"]}
         return
@@ -128,7 +128,7 @@ def _run_turn(message, uid, llm, store, show_panel, turn, attrs):
         generation.end()
     meta = {"tools": [t["name"] for t in choice.tools], "confidence": choice.confidence,
             "action": choice.action, "guards": choice.guards}
-    saved = store.add_message(uid, "assistant", reply, meta)
+    saved = store.add_message(uid, "assistant", reply, tracing.link(meta, turn))
 
     # ⑤ 기억 정리
     yield {"type": "memory_start"}
@@ -172,6 +172,7 @@ def greet(uid, llm, store):
                                   {"role": "user", "content": "(앱을 열었다. 먼저 말을 걸어 줘)"}])
         observation.update(metadata={"reminders": len(due), "first_meeting": not last})
     tracing.flush()
-    saved = store.add_message(uid, "assistant", text, {"action": "greeting", "reminders": [r["id"] for r in due]})
+    saved = store.add_message(uid, "assistant", text,
+                              tracing.link({"action": "greeting", "reminders": [r["id"] for r in due]}, observation))
     log("INFO", "먼저 말 걸기", reminders=len(due))
     return {"id": saved["id"], "text": text, "reminders": [r["text"] for r in due]}
