@@ -6,9 +6,9 @@ fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했�
 """
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.tools import CITIES, TOOLS
 
@@ -26,27 +26,50 @@ CANCEL_WORDS = ["취소", "지워", "없던 걸로", "안 알려 줘도", "안 �
 LIST_PATTERN = re.compile(r"(약속|알림|리마인드).*(뭐|목록|있어|있지|있었|보여|확인)")
 
 
-def router_prompt():
+PROMPT_NAME = "router"  # Langfuse 프롬프트 이름
+# Langfuse 에 버전 1로 올린 문장. Langfuse 에서 가져오지 못하면 이 문장으로 답한다.
+# {{tools}} 와 {{max_tools}} 는 서비스가 채운다(Langfuse 변수 문법). https://langfuse.com/docs/prompt-management/data-model
+ROUTER_TEMPLATE = "\n".join([
+    "너는 AI 친구 서비스에서 사용자 메시지에 답하기 전에 필요한 도구를 고르는 선택기다.",
+    "쓸 수 있는 도구:",
+    "{{tools}}",
+    "",
+    "규칙:",
+    "- 도구가 필요 없는 일상 대화면 tools 를 빈 배열로 둔다. 대부분의 메시지는 여기에 해당한다.",
+    "- 꼭 필요한 도구만 최대 {{max_tools}}개 고른다. 묻지 않은 정보의 도구는 덧붙이지 않는다(날씨만 물으면 get_weather 하나).",
+    "- 날씨나 미세먼지 이야기를 해도 예보를 묻는 게 아니라 경험이나 하소연이면 도구를 쓰지 않는다.",
+    "- location 은 메시지에 도시 이름이 있으면 그 도시, 없으면 사용자 지역이다.",
+    "- date 는 [달력]을 보고 정한 YYYY-MM-DD 날짜다. 날짜 표현이 없으면 오늘이다.",
+    "- create_reminder 는 사용자가 나중에 알려 달라고 분명히 부탁할 때만 고른다. 일정이 있다는 이야기만 하면 고르지 않는다.",
+    "- create_reminder 의 text 는 알려 줄 내용만 짧게 쓴다. 예: '우산 챙기기', '일찍 자기'.",
+    "- create_reminder 의 due_at 은 [지금] 시각과 시간대를 기준으로 계산한다. 시각 없이 날짜만 있으면 09:00, 아침 08:00, 점심 12:00, 저녁 19:00, 밤 21:00 으로 한다.",
+    "- 최근 대화를 보고 '그럼 모레는?' 같은 이어지는 질문의 도구와 인자를 정한다.",
+    "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다.",
+    "- reason 은 고른 이유를 한국어 한 문장으로 쓴다.",
+    '- 반드시 JSON 하나로만 답한다: {"tools": [{"name": "도구 이름", "args": {인자}}], "confidence": 0과 1 사이 숫자, "reason": "이유"}',
+])
+
+
+def prompt_variables():
+    """프롬프트에서 바뀌는 부분. 도구 목록은 app/tools.py 의 TOOLS 에서 만든다."""
     tools = "\n".join(f"- {name}: {t['desc']}. 인자 {t['args']}" for name, t in TOOLS.items())
-    return "\n".join([
-        "너는 AI 친구 서비스에서 사용자 메시지에 답하기 전에 필요한 도구를 고르는 선택기다.",
-        "쓸 수 있는 도구:",
-        tools,
-        "",
-        "규칙:",
-        "- 도구가 필요 없는 일상 대화면 tools 를 빈 배열로 둔다. 대부분의 메시지는 여기에 해당한다.",
-        f"- 꼭 필요한 도구만 최대 {MAX_TOOLS}개 고른다. 묻지 않은 정보의 도구는 덧붙이지 않는다(날씨만 물으면 get_weather 하나).",
-        "- 날씨나 미세먼지 이야기를 해도 예보를 묻는 게 아니라 경험이나 하소연이면 도구를 쓰지 않는다.",
-        "- location 은 메시지에 도시 이름이 있으면 그 도시, 없으면 사용자 지역이다.",
-        "- date 는 [달력]을 보고 정한 YYYY-MM-DD 날짜다. 날짜 표현이 없으면 오늘이다.",
-        "- create_reminder 는 사용자가 나중에 알려 달라고 분명히 부탁할 때만 고른다. 일정이 있다는 이야기만 하면 고르지 않는다.",
-        "- create_reminder 의 text 는 알려 줄 내용만 짧게 쓴다. 예: '우산 챙기기', '일찍 자기'.",
-        "- create_reminder 의 due_at 은 [지금] 시각과 시간대를 기준으로 계산한다. 시각 없이 날짜만 있으면 09:00, 아침 08:00, 점심 12:00, 저녁 19:00, 밤 21:00 으로 한다.",
-        "- 최근 대화를 보고 '그럼 모레는?' 같은 이어지는 질문의 도구와 인자를 정한다.",
-        "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다.",
-        "- reason 은 고른 이유를 한국어 한 문장으로 쓴다.",
-        '- 반드시 JSON 하나로만 답한다: {"tools": [{"name": "도구 이름", "args": {인자}}], "confidence": 0과 1 사이 숫자, "reason": "이유"}',
-    ])
+    return {"tools": tools, "max_tools": MAX_TOOLS}
+
+
+def router_prompt(prompt=None):
+    """도구 선택 지시문. prompt 는 Langfuse 에서 가져온 프롬프트이고, 없으면 코드의 ROUTER_TEMPLATE 을 쓴다."""
+    variables = prompt_variables()
+    if prompt is not None:
+        return prompt.compile(**variables)
+    text = ROUTER_TEMPLATE
+    for key, value in variables.items():
+        text = text.replace("{{" + key + "}}", str(value))
+    return text
+
+
+def load_prompt(label=None):
+    """Langfuse 의 router 프롬프트(label 이 없으면 ENV 로 정한 라벨). 계측이 꺼져 있으면 None 이라 코드 문장을 쓴다."""
+    return tracing.get_prompt(PROMPT_NAME, fallback=ROUTER_TEMPLATE, label=label)
 
 
 @dataclass
@@ -112,11 +135,15 @@ def rule_choose(message, now, location):
 
 # ── 모델 ────────────────────────────────────────────────────────────
 
-def model_choose(message, history, now, location, llm):
+def model_choose(message, history, now, location, llm, prompt=None):
+    """prompt 를 넘기지 않으면 Langfuse 에서 가져온다(scripts/eval_tools.py 는 고른 라벨의 프롬프트를 넘긴다)."""
+    if prompt is None:
+        prompt = load_prompt()
+    tracing.link_prompt(prompt)  # 지금 열린 generation(choose-tools)에 프롬프트 버전을 붙인다
     recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:]) or "(없음)"
     user = (f"[지금] {now.isoformat()} ({when.WEEKDAYS[now.weekday()]}요일)\n[달력]\n{when.calendar_hint(now)}\n"
             f"[사용자 지역] {location}\n[최근 대화]\n{recent}\n\n[메시지]\n{message}")
-    data = llm.complete_json(router_prompt(), user)
+    data = llm.complete_json(router_prompt(prompt), user)
     tools = []
     for t in data.get("tools") or []:
         if isinstance(t, dict) and t.get("name") in TOOLS:
@@ -131,7 +158,30 @@ def model_choose(message, history, now, location, llm):
                 t["args"][key], fixed = when.fix_year(t["args"][key], now)
                 if fixed:
                     result.guards.append(f"{t['name']} 의 {key} 연도가 지난 연도라 {now.year}년으로 고쳤습니다.")
+
+    for t in result.tools:
+        # 안전장치: '금요일 시험 전날 밤'처럼 기준 날에서 옮기는 표현은 코드가 날짜를 계산한다
+        if t["name"] == "create_reminder" and (due := when.shifted_when(message, now)):
+            if not same_minute(t["args"].get("due_at"), due):
+                t["args"]["due_at"] = due.isoformat()
+                result.guards.append(f"create_reminder 의 due_at 을 메시지의 날짜 표현으로 계산한 {when.label(due)}로 고쳤습니다.")
+        # 안전장치: 기간을 말하지 않은 공휴일 질문은 모델이 넣은 기간을 쓰지 않는다(도구가 오늘부터 1년을 찾는다)
+        if t["name"] == "get_holidays" and not when.has_period(message) and (t["args"].get("from") or t["args"].get("to")):
+            t["args"].pop("from", None)
+            t["args"].pop("to", None)
+            result.guards.append("메시지에 기간 표현이 없어 get_holidays 의 기간을 지우고 오늘부터 1년을 찾습니다.")
     return result
+
+
+def same_minute(value, due):
+    """모델이 낸 due_at 이 코드가 계산한 시각과 분까지 같은지. 읽을 수 없으면 다르다고 본다."""
+    try:
+        got = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False
+    if got.tzinfo is None:
+        got = got.replace(tzinfo=due.tzinfo)
+    return got.replace(second=0, microsecond=0) == due
 
 
 def choose(message, history, now, location, llm):
