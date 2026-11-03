@@ -1,6 +1,9 @@
 """날짜와 시각 표현을 다루는 도구 모음.
 
-모델을 쓸 때는 모델이 "목요일 아침" 같은 표현을 ISO 시각으로 바꿔 주고, 코드는 그 값을 검사만 한다.
+모델을 쓸 때는 모델이 "목요일 아침" 같은 표현을 ISO 시각으로 바꿔 주고, 코드는 그 값을 검사한다.
+다만 모델이 자주 틀리는 두 가지는 코드가 사용자 메시지를 읽어 바로잡는다(app/router.py model_choose).
+  - "금요일 시험 전날 밤"처럼 기준 날에서 앞뒤로 옮기는 표현: shifted_when 이 [달력]과 같은 방식으로 계산한다.
+  - 기간을 말하지 않은 공휴일 질문: has_period 가 없다고 보면 모델이 넣은 기간을 쓰지 않는다.
 fake 모드(모델 없음)에서는 아래 규칙으로 흔한 표현만 읽는다.
 """
 import re
@@ -50,19 +53,10 @@ def day_offset(text, now):
     return None
 
 
-def parse_when(text, now):
-    """'내일 아침', '목요일 저녁 7시', '30분 뒤' 같은 표현을 시각으로 바꾼다. 못 읽으면 None."""
-    m = re.search(r"(\d+)\s*(분|시간)\s*(뒤|후|있다가)", text)
-    if m:
-        n = int(m.group(1))
-        return (now + (timedelta(minutes=n) if m.group(2) == "분" else timedelta(hours=n))).replace(second=0, microsecond=0)
-
-    offset = day_offset(text, now)
+def clock(text):
+    """'밤', '저녁 7시', '3시 반' 같은 표현을 (시, 분, 시각 표현이 있었는지)로 바꾼다. 없으면 09:00."""
     part = next((p for p in PARTS if p in text), None)
     hm = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분|\s*(반))?", text)
-    if offset is None and part is None and hm is None:
-        return None
-
     if hm:
         hour = int(hm.group(1))
         minute = int(hm.group(2) or (30 if hm.group(3) else 0))
@@ -72,7 +66,60 @@ def parse_when(text, now):
             hour += 12  # "3시"는 보통 오후 3시
     else:
         hour, minute = (PARTS[part], 0) if part else (9, 0)
-    hour %= 24
+    return hour % 24, minute, bool(part or hm)
+
+
+# 기준 요일에서 하루 앞뒤로 옮기는 표현. 이 두 가지만 코드가 계산한다.
+SHIFT_PATTERN = re.compile(r"전날|다음\s?날")
+WEEKDAY_PATTERN = re.compile(r"(다음\s*주\s*|이번\s*주\s*)?([월화수목금토일])요일")
+# 이런 말이 함께 있으면 무엇을 기준으로 옮기는지 애매하다. 그때는 모델이 낸 시각을 그대로 쓴다.
+AMBIGUOUS_PATTERN = re.compile(r"전전날|이튿날|\d+\s*일\s*(전|뒤|후)|(하루|이틀|사흘|나흘)\s*(전|뒤|후)|"
+                               r"오늘|내일|모레|글피|지난|저번|매주|격주")
+
+
+def shifted_when(text, now):
+    """'금요일 시험 전날 밤' → 그 금요일의 하루 전 21:00. 확실할 때만 계산하고, 애매하면 None(모델 값을 쓴다).
+
+    확실하다고 보는 경우: 요일 표현이 하나, '전날'이나 '다음날'이 하나, 요일이 그 말보다 앞에 있고,
+    다른 날짜 표현(오늘·내일, 이틀 전, 지난 주 등)이 없으며, 그 요일이 오늘과 같은 요일이 아닐 때.
+    기준 요일은 [달력]과 같은 방식(day_offset: 이번 주에 그 요일이 지났으면 다음 주)으로 정하고,
+    시각은 parse_when 과 같은 규칙(clock: 밤 21:00, 시각 표현이 없으면 09:00)으로 정한다."""
+    shifts = SHIFT_PATTERN.findall(text)
+    weekdays = list(WEEKDAY_PATTERN.finditer(text))
+    if len(shifts) != 1 or len(weekdays) != 1 or AMBIGUOUS_PATTERN.search(text):
+        return None
+    shift_at = SHIFT_PATTERN.search(text).start()
+    if weekdays[0].end() > shift_at:
+        return None
+    offset = day_offset(weekdays[0].group(0), now)
+    if offset == 0:  # 오늘과 같은 요일: 오늘인지 다음 주인지 애매하다
+        return None
+    shift = -1 if shifts[0] == "전날" else 1
+    hour, minute, _ = clock(text)
+    return (now + timedelta(days=offset + shift)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+# 공휴일 질문의 기간 표현. 이런 말이 없으면 기간을 정하지 않은 질문으로 본다("다음 공휴일 언제야?").
+PERIOD_PATTERN = re.compile(
+    r"(이번|다음|지난|저번)\s*(주|달)|\d{1,2}\s*월|\d{1,2}\s*일|\d{4}\s*년|\d+\s*(개월|주)|"
+    r"올해|금년|내년|작년|주말|연말|연초|상반기|하반기|오늘|내일|모레|[월화수목금토일]요일|\d{4}-\d{1,2}")
+
+
+def has_period(text):
+    return bool(PERIOD_PATTERN.search(text))
+
+
+def parse_when(text, now):
+    """'내일 아침', '목요일 저녁 7시', '30분 뒤' 같은 표현을 시각으로 바꾼다. 못 읽으면 None."""
+    m = re.search(r"(\d+)\s*(분|시간)\s*(뒤|후|있다가)", text)
+    if m:
+        n = int(m.group(1))
+        return (now + (timedelta(minutes=n) if m.group(2) == "분" else timedelta(hours=n))).replace(second=0, microsecond=0)
+
+    offset = day_offset(text, now)
+    hour, minute, has_time = clock(text)
+    if offset is None and not has_time:
+        return None
 
     base = now + timedelta(days=offset or 0)
     due = base.replace(hour=hour, minute=minute, second=0, microsecond=0)

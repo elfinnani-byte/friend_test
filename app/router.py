@@ -6,7 +6,7 @@ fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했�
 """
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from app import tracing, when
 from app.logs import log
@@ -158,7 +158,30 @@ def model_choose(message, history, now, location, llm, prompt=None):
                 t["args"][key], fixed = when.fix_year(t["args"][key], now)
                 if fixed:
                     result.guards.append(f"{t['name']} 의 {key} 연도가 지난 연도라 {now.year}년으로 고쳤습니다.")
+
+    for t in result.tools:
+        # 안전장치: '금요일 시험 전날 밤'처럼 기준 날에서 옮기는 표현은 코드가 날짜를 계산한다
+        if t["name"] == "create_reminder" and (due := when.shifted_when(message, now)):
+            if not same_minute(t["args"].get("due_at"), due):
+                t["args"]["due_at"] = due.isoformat()
+                result.guards.append(f"create_reminder 의 due_at 을 메시지의 날짜 표현으로 계산한 {when.label(due)}로 고쳤습니다.")
+        # 안전장치: 기간을 말하지 않은 공휴일 질문은 모델이 넣은 기간을 쓰지 않는다(도구가 오늘부터 1년을 찾는다)
+        if t["name"] == "get_holidays" and not when.has_period(message) and (t["args"].get("from") or t["args"].get("to")):
+            t["args"].pop("from", None)
+            t["args"].pop("to", None)
+            result.guards.append("메시지에 기간 표현이 없어 get_holidays 의 기간을 지우고 오늘부터 1년을 찾습니다.")
     return result
+
+
+def same_minute(value, due):
+    """모델이 낸 due_at 이 코드가 계산한 시각과 분까지 같은지. 읽을 수 없으면 다르다고 본다."""
+    try:
+        got = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False
+    if got.tzinfo is None:
+        got = got.replace(tzinfo=due.tzinfo)
+    return got.replace(second=0, microsecond=0) == due
 
 
 def choose(message, history, now, location, llm):
