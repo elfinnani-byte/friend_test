@@ -9,11 +9,13 @@
   서버 로그(app/logs.py)에는 지금처럼 원문을 남기지 않는다.
 - LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY 가 없으면 계측을 끈다. 꺼져 있어도 아래 함수는 그대로 불러도 되고,
   아무것도 보내지 않는다.
+- 도구 선택 지시문(router)은 Langfuse 프롬프트 관리에서 라벨로 가져오고, 쓴 버전을 choose-tools 에 연결한다(get_prompt, link_prompt).
 
 근거 문서(Python SDK v5):
   https://langfuse.com/docs/observability/sdk/instrumentation
   https://langfuse.com/docs/observability/features/masking
   https://langfuse.com/docs/observability/features/token-and-cost-tracking
+  https://langfuse.com/docs/prompt-management/get-started
 """
 import json
 import os
@@ -47,6 +49,7 @@ _enabled = False  # setup 에서 키가 있어 계측을 켰는지
 _provider = None  # setup 에서 만든 tracer provider. flush 가 이것을 비운다
 _version = "local"  # Cloud Run 리비전(K_REVISION). setup 에서 정한다
 _commit = "local"   # COMMIT_SHA
+_label = "staging"  # 서비스가 가져올 프롬프트 라벨. setup 에서 ENV 로 정한다
 
 
 def mask_text(text):
@@ -95,8 +98,9 @@ def mask_pii(*, params):
 def setup(settings):
     """앱 시작 때 한 번 부른다. .env 를 읽은 뒤(load_settings 뒤)에 불러야 키를 찾는다.
     environment 는 서비스 단위 값이라 클라이언트에 넣는다(ENV: local, staging, production)."""
-    global _client, _enabled, _provider, _version, _commit
+    global _client, _enabled, _provider, _version, _commit, _label
     _version, _commit = settings.revision, settings.commit
+    _label = prompt_label(settings.env)
     enabled = bool(os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip() and os.environ.get("LANGFUSE_SECRET_KEY", "").strip())
     if enabled:
         provider = _provider = make_provider()
@@ -134,6 +138,42 @@ class Attributes:
         with propagate_attributes(user_id=self.user_id, session_id=self.session_id, version=_version,
                                   metadata=dict(self.metadata), tags=list(self.tags) or None):
             yield
+
+
+def prompt_label(env):
+    """서비스가 가져올 프롬프트 라벨. ENV 가 production 이면 production, 그 밖에는(staging, local) staging."""
+    return "production" if env == "production" else "staging"
+
+
+def get_prompt(name, *, fallback, label=None):
+    """Langfuse 의 text 프롬프트를 라벨로 가져온다. label 이 없으면 setup 에서 ENV 로 정한 라벨.
+
+    - 계측이 꺼져 있으면(키 없음) Langfuse 를 부르지 않고 None 을 돌려준다. 부르는 쪽은 코드의 문장을 쓴다.
+    - 가져오지 못하면 SDK 가 fallback 문장으로 만든 프롬프트(is_fallback=True)를 돌려준다. 이 프롬프트는 트레이스에 연결되지 않는다.
+    - 가져온 프롬프트는 SDK 가 60초 동안 캐시하고, 지나면 이전 것을 쓰면서 뒤에서 새로 가져온다.
+    https://langfuse.com/docs/prompt-management/features/guaranteed-availability
+    https://langfuse.com/docs/prompt-management/features/caching
+    """
+    if not _enabled:
+        return None
+    label = label or _label
+    try:
+        # Langfuse 가 응답하지 않을 때 대화가 오래 멈추지 않게 재시도 1번, 3초로 둔다(SDK 기본은 2번, 5초)
+        prompt = client().get_prompt(name, label=label, type="text", fallback=fallback,
+                                     max_retries=1, fetch_timeout_seconds=3)
+    except Exception as error:
+        log("WARNING", "Langfuse 프롬프트를 가져오지 못해 코드의 문장을 씀", name=name, label=label, error=type(error).__name__)
+        return None
+    if prompt.is_fallback:
+        log("WARNING", "Langfuse 프롬프트를 가져오지 못해 코드의 문장을 씀", name=name, label=label)
+    return prompt
+
+
+def link_prompt(prompt):
+    """지금 열린 generation 에 프롬프트를 연결해 트레이스에서 이름과 버전이 보이게 한다. fallback 은 연결하지 않는다.
+    https://langfuse.com/docs/prompt-management/features/link-to-traces"""
+    if _enabled and prompt is not None and not prompt.is_fallback:
+        client().update_current_generation(prompt=prompt)
 
 
 def make_provider():

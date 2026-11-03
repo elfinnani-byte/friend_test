@@ -30,7 +30,6 @@ from app.config import load_dotenv  # noqa: E402
 EVAL = ROOT / "data" / "eval"
 TOOL_EVAL_TIME = "2026-10-12"  # tool_selection 정답을 만든 '지금'(scripts/eval_tools.py 와 같다)
 HOLIDAY_NOW = "2026-11-02(월) 14:00"  # holiday_reply 의 '지금'
-NEXT_HOLIDAY = {"T26": "2026-12-25"}  # 다음 공휴일을 묻는 항목. TOOL_EVAL_TIME 기준 정답
 
 
 def read_jsonl(name):
@@ -44,8 +43,8 @@ def tool_selection_items():
         metadata = {"id": row["id"], "category": "+".join(row["expected_tools"]) or "none"}  # 정답 도구 조합
         if row.get("note"):
             metadata["note"] = row["note"]
-        if row["id"] in NEXT_HOLIDAY:
-            expected["next_holiday"] = NEXT_HOLIDAY[row["id"]]
+        if row.get("next_holiday"):  # 다음 공휴일을 묻는 항목. TOOL_EVAL_TIME 기준 정답(scripts/eval_tools.py 도 이 값으로 채점)
+            expected["next_holiday"] = row["next_holiday"]
             metadata["evaluated_at"] = TOOL_EVAL_TIME
         yield row["id"], {"message": row["message"], "history": row["history"]}, expected, metadata
 

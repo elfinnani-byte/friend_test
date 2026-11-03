@@ -23,7 +23,7 @@
 {"id": "T23", "message": "지금 창문 열어서 환기해도 될까", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": [], "expected_args": {"get_air_quality": {"day": 0}}, "note": ""}
 {"id": "T24", "message": "내일 한강에서 러닝하려는데 공기 괜찮아?", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": ["get_weather"], "expected_args": {"get_air_quality": {"day": 1}}, "note": "날씨를 함께 골라도 정답"}
 {"id": "T25", "message": "오늘 마스크 써야 할까?", "history": [], "expected_tools": ["get_air_quality"], "optional_tools": [], "expected_args": {"get_air_quality": {"day": 0}}, "note": ""}
-{"id": "T26", "message": "다음 공휴일 언제야?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": ""}
+{"id": "T26", "message": "다음 공휴일 언제야?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": "", "next_holiday": "2026-12-25"}
 {"id": "T27", "message": "올해 남은 빨간 날 알려 줘", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": ""}
 {"id": "T28", "message": "12월에 연휴 있어?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {"get_holidays": {"from": "2026-12-01", "to": "2026-12-31"}}, "note": ""}
 {"id": "T29", "message": "내년 설날 연휴가 언제야?", "history": [], "expected_tools": ["get_holidays"], "optional_tools": [], "expected_args": {}, "note": ""}
