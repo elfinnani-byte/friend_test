@@ -20,6 +20,10 @@ PROVIDERS = {
     "fake": {"base_url": None, "model": "fake"},
 }
 
+# 크레딧. 숫자는 여기에만 둔다(app/credits.py 가 읽는다).
+CREDIT_COST_PER_MESSAGE = 1   # 메시지 하나에 줄어드는 크레딧. 답을 만들다 실패하면 같은 수만큼 되돌린다
+FREE_SIGNUP_CREDITS = 30      # 처음 온 사용자에게 한 번 주는 무료 크레딧
+
 
 @dataclass
 class Settings:

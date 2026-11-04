@@ -9,7 +9,7 @@ import itertools
 import threading
 from datetime import datetime, timezone
 
-from app.store.base import DEFAULT_SETTINGS
+from app.store.base import DEFAULT_SETTINGS, DuplicateReference
 
 
 def utcnow():
@@ -21,6 +21,9 @@ class MemoryStore:
         self.lock = threading.Lock()
         self.ids = itertools.count(1)
         self.users = {}
+        # 크레딧 원장은 사용자 데이터와 따로 둔다. 내 데이터 삭제(delete_all)로 지워지면 무료 크레딧을 다시 받게 된다
+        self.ledger = {}      # uid -> 기록 목록
+        self.refs = set()     # 모든 사용자의 ref. 데이터베이스의 unique 제약처럼 겹치면 거절한다
 
     def _user(self, uid):
         return self.users.setdefault(uid, {
@@ -111,6 +114,24 @@ class MemoryStore:
                     r.update(status="delivered", delivered_at=utcnow())
                     claimed.append(dict(r))
         return claimed
+
+    # 크레딧 원장
+    def credit_balance(self, uid):
+        return sum(e["delta"] for e in self.ledger.get(uid, []))
+
+    def add_credit(self, uid, delta, reason, ref):
+        """기록 한 줄을 더한다. ref 가 이미 있으면 DuplicateReference."""
+        with self.lock:
+            if ref in self.refs:
+                raise DuplicateReference(ref)
+            e = {"id": next(self.ids), "delta": int(delta), "reason": reason, "ref": ref, "created_at": utcnow()}
+            self.refs.add(ref)
+            self.ledger.setdefault(uid, []).append(e)
+        return dict(e)
+
+    def recent_credits(self, uid, limit):
+        """최근 기록부터 limit 줄."""
+        return [dict(e) for e in reversed(self.ledger.get(uid, [])[-limit:])]
 
     def delete_all(self, uid):
         self.users.pop(uid, None)

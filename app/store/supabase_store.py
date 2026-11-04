@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app.store.base import DEFAULT_SETTINGS
+from app.store.base import DEFAULT_SETTINGS, DuplicateReference
 
 
 def parse_time(value):
@@ -138,6 +138,30 @@ class SupabaseStore:
                             user_id=f"eq.{uid}", status="eq.pending", due_at=f"lte.{iso(now)}")
         return [self._reminder(r) for r in rows]
 
+    # 크레딧 원장(credit_ledger)
+    def _credit(self, row):
+        return {"id": row["id"], "delta": row["delta"], "reason": row["reason"], "ref": row["ref"],
+                "created_at": parse_time(row["created_at"])}
+
+    def credit_balance(self, uid):
+        rows = self._get("credit_ledger", user_id=f"eq.{uid}", select="delta")
+        return sum(r["delta"] for r in rows)
+
+    def add_credit(self, uid, delta, reason, ref):
+        """기록 한 줄을 더한다. ref 의 unique 제약에 걸리면(PostgREST 409) DuplicateReference."""
+        try:
+            row = self._insert("credit_ledger", {"user_id": uid, "delta": int(delta), "reason": reason, "ref": ref})
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 409:
+                raise DuplicateReference(ref) from None
+            raise
+        return self._credit(row)
+
+    def recent_credits(self, uid, limit):
+        """최근 기록부터 limit 줄."""
+        return [self._credit(r) for r in self._get("credit_ledger", user_id=f"eq.{uid}", order="id.desc", limit=limit)]
+
     def delete_all(self, uid):
+        # credit_ledger 는 지우지 않는다. 지우면 무료 크레딧을 다시 받게 된다(계정 삭제 때는 외래 키로 함께 지워진다)
         for table in ("messages", "summaries", "memories", "reminders", "characters", "user_settings"):
             self._delete(table, user_id=f"eq.{uid}")

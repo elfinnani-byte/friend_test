@@ -61,6 +61,7 @@ body.has-banner .app{height:calc(100dvh - 32px)}
 .topbar .t{font-weight:800}
 .topbar .s{font-size:12px;color:var(--ink-3)}
 .ai-badge{margin-left:auto;font-size:12px;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
+.credits{margin-left:8px;font-size:12px;font-weight:600;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);padding:4px 10px;border-radius:999px;white-space:nowrap}
 .menu-btn,.panel-btn{display:none;border:1px solid var(--line);background:#fff;border-radius:10px;padding:6px 10px;font-size:13px;font-weight:600}
 
 .chat{flex:1;overflow-y:auto;padding:24px 24px 8px}
@@ -189,6 +190,7 @@ textarea.input{min-height:80px;resize:vertical}
   .sheet-close{display:inline-block;margin-left:auto;border:0;background:#3a4256;color:#fff;border-radius:8px;padding:4px 10px}
   .scrim.on{display:block;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:20}
   .ai-badge{display:none}
+  .credits{margin-left:auto}
   .topbar{padding:10px 14px}
   .chat{padding:16px 14px 8px}
   .composer{padding:8px 12px 14px}
@@ -224,6 +226,7 @@ textarea.input{min-height:80px;resize:vertical}
       <div class="ava" id="topAva">🐻</div>
       <div><div class="t" id="topName">하루</div><div class="s" id="topSub">대화</div></div>
       <span class="ai-badge">AI 캐릭터와의 대화입니다</span>
+      <span class="credits" id="credits" title="남은 크레딧" hidden></span>
       <button class="panel-btn" id="panelBtn">이번 턴</button>
     </header>
 
@@ -463,6 +466,7 @@ async function send(text) {
   let reply = "", busyNote = null, finished = false;
   try {
     const r = await api("/api/chat", {method: "POST", body: JSON.stringify({message: text}), raw: true});
+    if (r.status === 402) { bubble.textContent = (await r.json()).message; return; }  // 크레딧 부족: 서버 문구를 그대로 보여 준다
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
@@ -510,6 +514,7 @@ async function send(text) {
     console.error(err);
   } finally {
     busy = false; $("#send").disabled = false; $("#input").focus();
+    refreshCredits();
   }
 }
 
@@ -672,6 +677,11 @@ async function loadMemory() {
   $("#remList").onclick = async e => { if (e.target.dataset.id) { await api(`/api/reminders/${e.target.dataset.id}`, {method: "DELETE"}); loadMemory(); } };
   $("#memCount").textContent = mems.length || "";
 }
+// 잔액은 서버가 원장으로 계산한다. 화면은 받아서 보여 주기만 한다
+async function refreshCredits() {
+  try { const c = await api("/api/credits"); $("#credits").textContent = `크레딧 ${c.balance}`; $("#credits").hidden = false; }
+  catch (err) { console.error(err); }
+}
 async function refreshCount() { const m = await api("/api/memories"); $("#memCount").textContent = m.length || ""; }
 $("#clearMem").onclick = async () => { if (confirm("기억을 모두 지울까요?")) { await api("/api/memories", {method: "DELETE"}); loadMemory(); } };
 $("#deleteAll").onclick = async () => {
@@ -691,7 +701,7 @@ $("#deleteAll").onclick = async () => {
   me = await api("/api/me");
   renderAccount();
   character = (await api("/api/character")).character;
-  paintCharacter(); refreshCount();
+  paintCharacter(); refreshCount(); refreshCredits();
   if (!me.has_character) { $("#setupTitle").textContent = "캐릭터 만들기"; show("setup"); return; }
   await loadHistory();
   await greet();
