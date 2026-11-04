@@ -307,3 +307,19 @@ def test_low_flag_comes_from_server(shop):
 def test_result_pages_are_served(path):
     r = client.get(path)
     assert r.status_code == 200 and "/api/orders/confirm" in r.text
+
+
+def test_overlapping_confirms_grant_credits_once(shop, monkeypatch):
+    # 같은 승인 요청 두 개가 거의 동시에 와서 둘 다 주문을 pending 으로 읽은 경우(첫 요청이 paid 로 바꾸기 전).
+    # 둘 다 승인 API 까지 가도(같은 멱등키) 크레딧은 원장 ref order:<주문ID> 로 한 번만 들어가야 한다
+    store, toss = shop
+    start = balance()
+    o = order()
+    real_get = store.get_order
+    monkeypatch.setattr(store, "get_order", lambda uid, oid: {**real_get(uid, oid), "status": "pending"})
+    for _ in range(2):
+        assert confirm(o["order_id"], 1000).status_code == 200
+    assert len(toss.confirms) == 2 and {c[1] for c in toss.confirms} == {o["order_id"]}
+    assert balance() == start + 100
+    purchases = [r for r in client.get("/api/credits").json()["recent"] if r["reason"] == "purchase"]
+    assert len(purchases) == 1
