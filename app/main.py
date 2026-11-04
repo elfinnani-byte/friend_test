@@ -25,12 +25,13 @@ from app import agent, credits, gate, ocr, payments, tracing, when
 from app.auth import Auth, User
 from app.config import CREDIT_COST_PER_MESSAGE, LOW_CREDITS, ROOT, load_settings
 from app.llm import make_llm
-from app.logs import log
+from app.logs import log, mask_access_log
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
 from app.safety import is_crisis
 from app.store.base import make_store
 from app.tools import CITIES
 
+mask_access_log()  # uvicorn 접속 로그에서 결제 주소의 paymentKey 를 가린다
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
 tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는다. 키가 없으면 꺼진다
 llm = make_llm(settings)
