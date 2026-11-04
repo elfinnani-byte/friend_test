@@ -4,7 +4,9 @@
 - /health, /version: 서비스 상태와 배포 버전
 - /api/config: 화면이 쓰는 설정(로그인 방식, 개발용 패널 표시 여부)
 - /api/character, /api/settings: 캐릭터와 사용자 설정
-- /api/chat: 메시지 한 턴. 결과를 이벤트(JSON 한 줄씩)로 스트리밍한다
+- /api/chat: 메시지 한 턴. 결과를 이벤트(JSON 한 줄씩)로 스트리밍한다. 받자마자 크레딧을 차감한다
+- /api/credits: 크레딧 잔액과 최근 기록
+- /api/products, /api/orders, /api/orders/confirm, /buy/success, /buy/fail: 크레딧 구매(토스페이먼츠, payments.py)
 - /api/greeting: 앱을 열 때 먼저 말 걸기
 - /api/ocr: 사진 속 글자 읽기(OCR_ENABLED=true 일 때)
 - /api/memories, /api/reminders, /api/data: 기억, 약속, 내 데이터 관리
@@ -13,25 +15,29 @@ import html
 import json
 import os
 import time
+import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, gate, ocr, tracing, when
+from app import agent, credits, gate, ocr, payments, tracing, when
 from app.auth import Auth, User
-from app.config import ROOT, load_settings
+from app.config import CREDIT_COST_PER_MESSAGE, LOW_CREDITS, ROOT, load_settings
 from app.llm import make_llm
-from app.logs import log
+from app.logs import log, mask_access_log
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
+from app.safety import is_crisis
 from app.store.base import make_store
 from app.tools import CITIES
 
+mask_access_log()  # uvicorn 접속 로그에서 결제 주소의 paymentKey 를 가린다
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
 tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는다. 키가 없으면 꺼진다
 llm = make_llm(settings)
 store = make_store(settings)
 current_user = Auth(settings)
+toss = payments.TossClient(settings.toss_secret_key) if settings.payments_enabled else None
 
 app = FastAPI(title="AI 친구 에이전트")
 
@@ -79,6 +85,16 @@ class ReportRequest(BaseModel):
     reason: str = ""
 
 
+class OrderRequest(BaseModel):
+    product_id: str
+
+
+class ConfirmRequest(BaseModel):
+    payment_key: str
+    order_id: str
+    amount: int
+
+
 class FeedbackRequest(BaseModel):
     message_id: int
     liked: bool  # 좋아요 true, 별로예요 false
@@ -113,6 +129,8 @@ def config():
             "supabase_publishable_key": settings.supabase_publishable_key if settings.auth == "supabase" else "",
             "google_login": settings.google_login, "show_turn_panel": settings.show_turn_panel,
             "ocr_enabled": settings.ocr_enabled,
+            # 결제 UI 초기화용 클라이언트 키는 브라우저에 공개하는 키다. 시크릿 키는 절대 넣지 않는다
+            "payments_enabled": settings.payments_enabled, "toss_client_key": settings.toss_client_key,
             "options": OPTIONS, "cities": list(CITIES)}
 
 
@@ -175,15 +193,75 @@ def chat(req: ChatRequest, user: User = Depends(current_user), model=Depends(get
     if not message:
         raise HTTPException(400, "메시지가 비어 있습니다")
 
+    # 메시지를 받자마자 차감한다. 위기 표현은 크레딧과 상관없이 안전 응답을 받아야 하므로 검사도 차감도 하지 않는다
+    message_id = uuid.uuid4().hex
+    charged = not is_crisis(message)
+    if charged:
+        ok, balance = credits.charge(store, user.id, message_id)
+        if not ok:
+            log("INFO", "크레딧 부족으로 거절")
+            return JSONResponse({**credits.INSUFFICIENT, "balance": balance}, status_code=402)
+
     def events():
+        answered = False  # 답을 저장한 뒤(기억 정리 단계)의 실패는 답을 받았으므로 되돌리지 않는다
         try:
             for event in agent.run_turn(message, user.id, model, store, settings.show_turn_panel):
+                answered = answered or event["type"] in ("memory_start", "done")
                 yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
         except Exception as error:
             log("ERROR", "대화 처리 실패", error=type(error).__name__)
+            if charged and not answered:
+                credits.refund(store, user.id, message_id)
             yield json.dumps({"type": "error", "message": "답을 만들지 못했어요. 잠시 뒤 다시 보내 주세요."}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+@app.get("/api/credits")
+def get_credits(user: User = Depends(current_user)):
+    balance = credits.balance(store, user.id)
+    return {"balance": balance, "low": balance <= LOW_CREDITS,
+            "recent": [{"delta": e["delta"], "reason": e["reason"], "ref": e["ref"],
+                        "created_at": e["created_at"].isoformat()} for e in store.recent_credits(user.id, 10)]}
+
+
+# ── 크레딧 구매 ─────────────────────────────────────────────────────
+
+def payment_error(error):
+    return JSONResponse(error.body(), status_code=error.status)
+
+
+@app.get("/api/products")
+def products():
+    return {"products": payments.product_list(), "cost_per_message": CREDIT_COST_PER_MESSAGE}
+
+
+@app.post("/api/orders")
+def create_order(req: OrderRequest, user: User = Depends(current_user)):
+    if not settings.payments_enabled:
+        return JSONResponse({"error": "payments_disabled", "message": "지금은 결제를 할 수 없어요."}, status_code=503)
+    try:
+        return payments.create_order(store, user.id, req.product_id)
+    except payments.PaymentError as error:
+        return payment_error(error)
+
+
+@app.post("/api/orders/confirm")
+def confirm_order(req: ConfirmRequest, user: User = Depends(current_user)):
+    if not settings.payments_enabled:
+        return JSONResponse({"error": "payments_disabled", "message": "지금은 결제를 할 수 없어요."}, status_code=503)
+    try:
+        added = payments.confirm_order(store, user.id, toss, req.order_id, req.payment_key, req.amount)
+    except payments.PaymentError as error:
+        return payment_error(error)
+    return {"ok": True, "credits": added, "balance": credits.balance(store, user.id)}
+
+
+@app.get("/buy/success", response_class=HTMLResponse)
+@app.get("/buy/fail", response_class=HTMLResponse)
+def buy_result():
+    # 성공, 실패 모두 같은 페이지가 주소를 보고 처리한다(승인은 이 페이지가 /api/orders/confirm 으로 서버에 맡긴다)
+    return (ROOT / "static" / "buy_result.html").read_text(encoding="utf-8")
 
 
 @app.post("/api/greeting")

@@ -20,6 +20,17 @@ PROVIDERS = {
     "fake": {"base_url": None, "model": "fake"},
 }
 
+# 크레딧. 숫자는 여기에만 둔다(app/credits.py 가 읽는다).
+CREDIT_COST_PER_MESSAGE = 1   # 메시지 하나에 줄어드는 크레딧. 답을 만들다 실패하면 같은 수만큼 되돌린다
+FREE_SIGNUP_CREDITS = 30      # 처음 온 사용자에게 한 번 주는 무료 크레딧
+LOW_CREDITS = 10              # 잔액이 이 수 이하면 화면이 '크레딧이 얼마 남지 않았어요' 띠를 보여 준다
+
+# 크레딧 상품표. 결제 금액은 늘 이 표에서 정한다(화면이 보낸 금액을 믿지 않는다). GET /api/products 가 내려 준다.
+PRODUCTS = {
+    "credits_100": {"name": "크레딧 100개", "amount": 1000, "credits": 100},
+    "credits_550": {"name": "크레딧 550개", "amount": 5000, "credits": 550},
+}
+
 
 @dataclass
 class Settings:
@@ -38,6 +49,9 @@ class Settings:
     google_login: bool
     show_turn_panel: bool
     ocr_enabled: bool
+    toss_client_key: str      # 브라우저에 공개해도 되는 키(결제 UI 초기화)
+    toss_secret_key: str      # 서버에서만 쓰는 키(결제 승인). 화면, 로그, 응답에 넣지 않는다
+    payments_enabled: bool    # 두 키가 모두 있고 테스트 키(test_)일 때만 켠다
 
 
 def load_dotenv(path):
@@ -93,6 +107,14 @@ def load_settings():
     if storage == "supabase" and not secret:
         stop("STORAGE=supabase 인데 SUPABASE_SECRET_KEY 가 없어 앱을 시작하지 않습니다.")
 
+    toss_client = os.environ.get("TOSS_CLIENT_KEY", "").strip()
+    toss_secret = os.environ.get("TOSS_SECRET_KEY", "").strip()
+    # 이번 단계는 테스트 결제만 한다. 라이브 키(live_)가 들어 있으면 실제 돈이 나가므로 결제를 켜지 않는다
+    payments_enabled = bool(toss_client and toss_secret) and all(k.startswith("test_") for k in (toss_client, toss_secret))
+    if (toss_client or toss_secret) and not payments_enabled:
+        log("WARNING", "토스페이먼츠 키가 둘 다 있고 테스트 키(test_)일 때만 결제를 켭니다. 결제를 끈 채로 시작합니다.",
+            client_key=bool(toss_client), secret_key=bool(toss_secret))
+
     defaults = PROVIDERS[provider]
     settings = Settings(
         provider=provider,
@@ -111,7 +133,11 @@ def load_settings():
         # 개발용 "이번 턴" 패널. production 에서는 기본으로 끈다.
         show_turn_panel=env_flag("SHOW_TURN_PANEL", env != "production"),
         ocr_enabled=env_flag("OCR_ENABLED", False),  # 사진 글자 읽기. tesseract 프로그램이 필요하다
+        toss_client_key=toss_client if payments_enabled else "",
+        toss_secret_key=toss_secret if payments_enabled else "",
+        payments_enabled=payments_enabled,
     )
     log("INFO", "앱을 시작합니다.", provider=settings.provider, model=settings.model, env=settings.env,
-        storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel)
+        storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel,
+        payments=settings.payments_enabled)
     return settings

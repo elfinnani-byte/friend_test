@@ -61,6 +61,26 @@ body.has-banner .app{height:calc(100dvh - 32px)}
 .topbar .t{font-weight:800}
 .topbar .s{font-size:12px;color:var(--ink-3)}
 .ai-badge{margin-left:auto;font-size:12px;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
+.credits{margin-left:8px;font-family:inherit;font-size:12px;font-weight:600;line-height:1.6;color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);padding:4px 10px;border-radius:999px;white-space:nowrap;cursor:pointer}
+.credits:hover{border-color:var(--line-2)}
+.lowband{display:flex;align-items:center;gap:10px;justify-content:space-between;background:var(--warn-soft);color:var(--warn);border-radius:12px;padding:8px 12px;margin-bottom:8px;font-size:13px;font-weight:600}
+.lowband .btn{padding:4px 10px;font-size:13px}
+.modal-back{position:fixed;inset:0;background:rgba(20,18,15,.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
+.modal{background:var(--surface);border-radius:var(--radius);box-shadow:var(--shadow);width:100%;max-width:520px;max-height:calc(100dvh - 32px);overflow-y:auto;padding:20px}
+.modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.modal-head h2{margin:0;font-size:18px}
+.modal-head .x{border:0;background:transparent;font-size:18px;color:var(--ink-3);cursor:pointer}
+.buy-reason{background:var(--accent-soft);color:var(--accent);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:600;margin-bottom:10px}
+.buy-balance{font-size:15px}
+.buy-balance b{font-size:20px}
+.buy-rule,.buy-refund,.buy-guest,.buy-off{font-size:13px;color:var(--ink-2);margin:6px 0}
+.buy-guest{color:var(--warn)}
+.products{display:grid;gap:8px;margin:12px 0}
+.product{display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left;border:1px solid var(--line-2);background:#fff;border-radius:12px;padding:10px 14px;font-family:inherit;font-size:14px;color:var(--ink);cursor:pointer}
+.product.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.product .unit{font-size:12px;color:var(--ink-3)}
+.product .price{font-weight:700}
+.btn.wide{width:100%;padding:12px;margin-top:8px}
 .menu-btn,.panel-btn{display:none;border:1px solid var(--line);background:#fff;border-radius:10px;padding:6px 10px;font-size:13px;font-weight:600}
 
 .chat{flex:1;overflow-y:auto;padding:24px 24px 8px}
@@ -189,6 +209,7 @@ textarea.input{min-height:80px;resize:vertical}
   .sheet-close{display:inline-block;margin-left:auto;border:0;background:#3a4256;color:#fff;border-radius:8px;padding:4px 10px}
   .scrim.on{display:block;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:20}
   .ai-badge{display:none}
+  .credits{margin-left:auto}
   .topbar{padding:10px 14px}
   .chat{padding:16px 14px 8px}
   .composer{padding:8px 12px 14px}
@@ -224,12 +245,14 @@ textarea.input{min-height:80px;resize:vertical}
       <div class="ava" id="topAva">🐻</div>
       <div><div class="t" id="topName">하루</div><div class="s" id="topSub">대화</div></div>
       <span class="ai-badge">AI 캐릭터와의 대화입니다</span>
+      <button type="button" class="credits" id="credits" title="크레딧 충전" hidden></button>
       <button class="panel-btn" id="panelBtn">이번 턴</button>
     </header>
 
     <section id="view-chat" class="main" style="flex:1;min-height:0">
       <div class="chat" id="chat"><div class="thread" id="thread"></div></div>
       <div class="composer"><div class="composer-in">
+        <div class="lowband" id="lowBand" hidden><span>크레딧이 얼마 남지 않았어요 (<b id="lowLeft"></b>개)</span><button type="button" class="btn primary" id="lowBuy">크레딧 사기</button></div>
         <div class="suggest" id="suggest"></div>
         <form class="box" id="form">
           <button type="button" class="photo" id="photoBtn" title="사진에서 글자 읽기" hidden>📷</button>
@@ -293,6 +316,25 @@ textarea.input{min-height:80px;resize:vertical}
     </div>
     <div class="panel-body" id="panelBody"><div class="panel-empty">메시지를 보내면 캐릭터가 고른 도구, 도구 결과, 답에 쓴 기억, 새로 기억한 것이 여기에 표시됩니다.</div></div>
   </aside>
+</div>
+
+<!-- 크레딧 충전 팝업. 상품을 고르면 같은 팝업 안에 토스페이먼츠 주문서형 결제 UI 를 그린다 -->
+<div class="modal-back" id="buyModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="buyTitle">
+    <div class="modal-head"><h2 id="buyTitle">크레딧 충전</h2><button type="button" class="x" id="buyClose" aria-label="닫기">✕</button></div>
+    <div class="buy-reason" id="buyReason" hidden></div>
+    <div class="buy-balance">남은 크레딧 <b id="buyBalance">-</b>개</div>
+    <p class="buy-rule" id="buyRule"></p>
+    <div class="products" id="products"></div>
+    <p class="buy-off" id="buyOff" hidden>지금은 결제를 할 수 없어요.</p>
+    <div id="payArea" hidden>
+      <div id="payment-method"></div>
+      <div id="agreement"></div>
+      <button type="button" class="btn primary wide" id="payBtn">결제하기</button>
+    </div>
+    <p class="buy-refund" id="refundPolicy">환불 기준: (문구 준비 중)</p>
+    <p class="buy-guest" id="buyGuest" hidden>⚠ 게스트로 사용 중이에요. 브라우저 데이터를 지우면 산 크레딧에 다시 접근할 수 없어요.</p>
+  </div>
 </div>
 
 <script type="module">
@@ -455,7 +497,7 @@ async function greet() {
 async function send(text) {
   if (busy || !text.trim()) return;
   busy = true; $("#send").disabled = true;
-  addRow("user", text);
+  const mine = addRow("user", text);
   const {row, bubble, under} = addRow("assistant", "");
   bubble.innerHTML = `<span class="cursor"></span>`;
   const panel = cfg.show_turn_panel ? startPanel() : null;
@@ -463,6 +505,15 @@ async function send(text) {
   let reply = "", busyNote = null, finished = false;
   try {
     const r = await api("/api/chat", {method: "POST", body: JSON.stringify({message: text}), raw: true});
+    if (r.status === 402) {
+      // 크레딧 부족: 보내려던 메시지를 입력창에 남기고(결제하러 다녀와도 남게 저장) 충전 팝업을 연다
+      const body = await r.json();
+      for (const el of [mine.row, mine.under, row, under]) el.remove();
+      $("#input").value = text; autosize(); pendingMessage.save(text);
+      openBuy(body.message);
+      return;
+    }
+    pendingMessage.clear();
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
@@ -510,6 +561,7 @@ async function send(text) {
     console.error(err);
   } finally {
     busy = false; $("#send").disabled = false; $("#input").focus();
+    refreshCredits();
   }
 }
 
@@ -672,6 +724,87 @@ async function loadMemory() {
   $("#remList").onclick = async e => { if (e.target.dataset.id) { await api(`/api/reminders/${e.target.dataset.id}`, {method: "DELETE"}); loadMemory(); } };
   $("#memCount").textContent = mems.length || "";
 }
+// 잔액은 서버가 원장으로 계산한다. 화면은 받아서 보여 주기만 한다
+async function refreshCredits() {
+  try {
+    const c = await api("/api/credits");
+    $("#credits").textContent = `크레딧 ${c.balance}`; $("#credits").hidden = false;
+    $("#buyBalance").textContent = c.balance;
+    $("#lowLeft").textContent = c.balance; $("#lowBand").hidden = !c.low;  // 기준(c.low)은 서버가 정한다
+  } catch (err) { console.error(err); }
+}
+
+// ── 보내려던 메시지 보관(402 로 결제하러 다녀와도 남게). 저장소를 못 쓰면 입력창에만 남는다
+const pendingMessage = {
+  save(t) { try { sessionStorage.setItem("chat-draft", t); } catch {} },
+  load() { try { return sessionStorage.getItem("chat-draft") || ""; } catch { return ""; } },
+  clear() { try { sessionStorage.removeItem("chat-draft"); } catch {} },
+};
+
+// ── 크레딧 충전 팝업(토스페이먼츠 결제위젯 v2, 주문서형)
+// 근거: https://docs.tosspayments.com/sdk/v2/js/payment-widget
+//   TossPayments(clientKey).widgets({customerKey}) → setAmount → renderPaymentMethods → renderAgreement → requestPayment
+// 금액은 서버가 주문을 만들 때 상품표로 정하고, 승인 전에 서버가 다시 비교한다(화면 금액을 믿지 않는다).
+let shop = null, chosen = null, widgets = null, rendered = false;
+function loadTossSdk() {
+  if (window.TossPayments) return Promise.resolve();
+  return new Promise((ok, fail) => {
+    const s = document.createElement("script");
+    s.src = "https://js.tosspayments.com/v2/standard";
+    s.onload = ok; s.onerror = () => fail(new Error("토스페이먼츠 SDK 를 불러오지 못했습니다"));
+    document.head.appendChild(s);
+  });
+}
+const won = n => n.toLocaleString("ko-KR");
+async function openBuy(reason) {
+  $("#buyReason").textContent = reason || ""; $("#buyReason").hidden = !reason;
+  $("#buyGuest").hidden = !me?.anonymous;
+  $("#buyModal").hidden = false;
+  refreshCredits();
+  if (!shop) shop = await api("/api/products");
+  $("#buyRule").textContent = `메시지 1개를 보낼 때마다 크레딧 ${shop.cost_per_message}개가 줄어요.`;
+  $("#buyOff").hidden = cfg.payments_enabled;
+  $("#products").innerHTML = shop.products.map(p => `<button type="button" class="product${chosen?.id === p.id ? " on" : ""}" data-id="${esc(p.id)}">
+      <span><b>${esc(p.name)}</b><br><span class="unit">크레딧 1개 ${won(p.unit_price)}원</span></span>
+      <span class="price">${won(p.amount)}원</span></button>`).join("");
+}
+function closeBuy() { $("#buyModal").hidden = true; }
+$("#credits").addEventListener("click", () => openBuy());
+$("#lowBuy").addEventListener("click", () => openBuy());
+$("#buyClose").addEventListener("click", closeBuy);
+$("#buyModal").addEventListener("click", e => { if (e.target.id === "buyModal") closeBuy(); });
+$("#products").addEventListener("click", async e => {
+  const btn = e.target.closest(".product");
+  if (!btn || !cfg.payments_enabled) return;
+  chosen = shop.products.find(p => p.id === btn.dataset.id);
+  for (const b of $("#products").children) b.classList.toggle("on", b === btn);
+  try {
+    if (!widgets) {
+      await loadTossSdk();
+      widgets = TossPayments(cfg.toss_client_key).widgets({customerKey: TossPayments.ANONYMOUS});  // 비회원 결제
+    }
+    await widgets.setAmount({currency: "KRW", value: chosen.amount});  // 렌더 전에 금액 설정, 상품을 바꾸면 다시 설정
+    if (!rendered) {
+      $("#payArea").hidden = false;
+      await Promise.all([widgets.renderPaymentMethods({selector: "#payment-method", variantKey: "DEFAULT"}),
+                         widgets.renderAgreement({selector: "#agreement", variantKey: "AGREEMENT"})]);
+      rendered = true;
+    }
+  } catch (err) { console.error(err); alert("결제 화면을 열지 못했어요. 잠시 뒤 다시 시도해 주세요."); }
+});
+$("#payBtn").addEventListener("click", async () => {
+  if (!chosen || !widgets) return;
+  $("#payBtn").disabled = true;
+  try {
+    const order = await api("/api/orders", {method: "POST", body: JSON.stringify({product_id: chosen.id})});
+    if (order.amount !== chosen.amount) await widgets.setAmount({currency: "KRW", value: order.amount});
+    await widgets.requestPayment({
+      orderId: order.order_id, orderName: order.order_name,
+      successUrl: location.origin + "/buy/success", failUrl: location.origin + "/buy/fail",
+    });
+  } catch (err) { console.error(err); alert("결제를 시작하지 못했어요. 잠시 뒤 다시 시도해 주세요."); }
+  finally { $("#payBtn").disabled = false; }
+});
 async function refreshCount() { const m = await api("/api/memories"); $("#memCount").textContent = m.length || ""; }
 $("#clearMem").onclick = async () => { if (confirm("기억을 모두 지울까요?")) { await api("/api/memories", {method: "DELETE"}); loadMemory(); } };
 $("#deleteAll").onclick = async () => {
@@ -691,10 +824,12 @@ $("#deleteAll").onclick = async () => {
   me = await api("/api/me");
   renderAccount();
   character = (await api("/api/character")).character;
-  paintCharacter(); refreshCount();
+  paintCharacter(); refreshCount(); refreshCredits();
   if (!me.has_character) { $("#setupTitle").textContent = "캐릭터 만들기"; show("setup"); return; }
   await loadHistory();
   await greet();
+  const saved = pendingMessage.load();  // 402 로 남겨 둔 메시지(결제하러 다녀온 경우)
+  if (saved && !$("#input").value) { $("#input").value = saved; autosize(); }
   $("#input").focus();
 })();
 </script>
