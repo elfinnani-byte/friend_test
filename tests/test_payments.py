@@ -1,6 +1,7 @@
 """크레딧 구매(토스페이먼츠 결제위젯 v2). 토스페이먼츠를 부르지 않고 가짜 클라이언트를 끼워 확인한다.
 테스트마다 새 메모리 저장소를 쓴다."""
 import base64
+import json
 
 import httpx
 import pytest
@@ -191,6 +192,74 @@ def test_toss_client_uses_basic_auth_with_colon_and_idempotency_key():
     assert req.url == "https://api.tosspayments.com/v1/payments/confirm" and req.method == "POST"
     assert req.headers["authorization"] == "Basic " + base64.b64encode(b"fake-toss-secret-for-tests:").decode()
     assert req.headers["idempotency-key"] == "confirm-order123"
+
+
+SECRET = "fake-toss-secret-for-tests"
+PAYMENT_KEY = "fake_payment_key_full_value_123"
+
+
+def scripted_toss(*responses):
+    """정해 둔 응답을 차례로 돌려주는 토스 클라이언트. 기다리지 않는다. (보낸 요청 목록, 클라이언트)"""
+    seen, queue = [], list(responses)
+
+    def handler(request):
+        seen.append(request)
+        return queue.pop(0)
+
+    toss = payments.TossClient(SECRET)
+    toss.http = httpx.Client(base_url=payments.API, headers=toss.http.headers, transport=httpx.MockTransport(handler))
+    toss.sleep = lambda seconds: None
+    return seen, toss
+
+
+PROCESSING = httpx.Response(409, json={"code": "IDEMPOTENT_REQUEST_PROCESSING", "message": "이전 요청이 처리 중입니다."})
+DONE = httpx.Response(200, json={"status": "DONE", "orderId": "order123", "totalAmount": 1000})
+
+
+def test_same_order_always_sends_same_idempotency_key():
+    seen, toss = scripted_toss(DONE, DONE, DONE)
+    for _ in range(3):
+        toss.confirm(PAYMENT_KEY, "order123", 1000)
+    assert {r.headers["idempotency-key"] for r in seen} == {"confirm-order123"}
+    assert payments.idempotency_key("order123") == "confirm-order123"
+    assert payments.idempotency_key("order456") != payments.idempotency_key("order123")
+
+
+def test_processing_409_is_retried_with_same_key():
+    seen, toss = scripted_toss(PROCESSING, PROCESSING, DONE)
+    waits = []
+    toss.sleep = waits.append
+    assert toss.confirm(PAYMENT_KEY, "order123", 1000)["status"] == "DONE"
+    assert len(seen) == 3 and {r.headers["idempotency-key"] for r in seen} == {"confirm-order123"}
+    assert waits == list(payments.CONFIRM_RETRY_WAITS[:2])
+
+
+def test_processing_409_gives_up_after_retries():
+    tries = len(payments.CONFIRM_RETRY_WAITS) + 1
+    seen, toss = scripted_toss(*[PROCESSING] * tries)
+    with pytest.raises(payments.TossError) as caught:
+        toss.confirm(PAYMENT_KEY, "order123", 1000)
+    assert (caught.value.status, caught.value.code) == (409, "IDEMPOTENT_REQUEST_PROCESSING")
+    assert len(seen) == tries
+
+
+def test_other_errors_are_not_retried():
+    seen, toss = scripted_toss(httpx.Response(400, json={"code": "REJECT_CARD_COMPANY", "message": "거절"}))
+    with pytest.raises(payments.TossError):
+        toss.confirm(PAYMENT_KEY, "order123", 1000)
+    assert len(seen) == 1
+
+
+def test_each_confirm_call_logs_order_and_key_but_not_secrets(capsys):
+    _, toss = scripted_toss(PROCESSING, DONE)
+    toss.confirm(PAYMENT_KEY, "order123", 1000)
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    calls = [line for line in lines if line["message"] == "결제 승인 API 호출"]
+    assert [(c["order_id"], c["idempotency_key"], c["attempt"], c["status"]) for c in calls] == \
+        [("order123", "confirm-order123", 1, 409), ("order123", "confirm-order123", 2, 200)]
+    out = json.dumps(lines, ensure_ascii=False)
+    token = base64.b64encode(f"{SECRET}:".encode()).decode()
+    assert SECRET not in out and token not in out and PAYMENT_KEY not in out
 
 
 def test_toss_client_error_has_code_and_message():

@@ -19,8 +19,10 @@
   https://docs.tosspayments.com/sdk/v2/js/payment-widget
   https://docs.tosspayments.com/guides/v2/get-started/llms-quick-reference
   https://docs.tosspayments.com/reference/error-codes
+  https://docs.tosspayments.com/reference/using-api/authorization (멱등키 헤더, 409 IDEMPOTENT_REQUEST_PROCESSING)
 """
 import base64
+import time
 import uuid
 
 import httpx
@@ -30,6 +32,12 @@ from app.logs import log
 from app.store.base import DuplicateReference
 
 API = "https://api.tosspayments.com"
+CONFIRM_RETRY_WAITS = (1, 2, 4)  # 409(같은 요청 처리 중)일 때 다시 묻기 전 기다리는 초. 최대 3번 더 묻는다
+
+
+def idempotency_key(order_id):
+    """결제 승인의 멱등키. 주문 번호(서버가 만든 uuid4)로 만들어, 같은 주문이면 늘 같은 값이다(15일간 유효)."""
+    return f"confirm-{order_id}"
 
 
 class TossError(Exception):
@@ -57,9 +65,28 @@ class TossClient:
         return r.json()
 
     def confirm(self, payment_key, order_id, amount):
-        """결제 승인 API. POST /v1/payments/confirm"""
-        return self._call("POST", "/v1/payments/confirm", headers={"Idempotency-Key": f"confirm-{order_id}"},
-                          json={"paymentKey": payment_key, "orderId": order_id, "amount": amount})
+        """결제 승인 API. POST /v1/payments/confirm
+
+        같은 주문이면 몇 번을 보내도 같은 멱등키가 간다. 409 IDEMPOTENT_REQUEST_PROCESSING(같은 요청이 처리 중)이면
+        잠시 뒤 같은 키로 다시 보내 응답을 확인한다. 키를 바꿔 다시 보내지 않는다(문서: 멱등키 헤더).
+        """
+        key = idempotency_key(order_id)
+        for attempt, wait in enumerate((*CONFIRM_RETRY_WAITS, None), start=1):
+            try:
+                result = self._call("POST", "/v1/payments/confirm", headers={"Idempotency-Key": key},
+                                    json={"paymentKey": payment_key, "orderId": order_id, "amount": amount})
+            except TossError as error:
+                # 시크릿 키와 paymentKey 는 남기지 않는다
+                log("INFO", "결제 승인 API 호출", order_id=order_id, idempotency_key=key, attempt=attempt,
+                    status=error.status, code=error.code)
+                if error.status == 409 and error.code == "IDEMPOTENT_REQUEST_PROCESSING" and wait is not None:
+                    self.sleep(wait)
+                    continue
+                raise
+            log("INFO", "결제 승인 API 호출", order_id=order_id, idempotency_key=key, attempt=attempt, status=200)
+            return result
+
+    sleep = staticmethod(time.sleep)  # 테스트에서 기다리지 않게 바꿔 끼운다
 
     def get_by_order(self, order_id):
         """주문번호로 결제 조회. GET /v1/payments/orders/{orderId}"""
