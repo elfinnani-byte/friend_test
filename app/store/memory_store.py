@@ -24,6 +24,7 @@ class MemoryStore:
         # 크레딧 원장은 사용자 데이터와 따로 둔다. 내 데이터 삭제(delete_all)로 지워지면 무료 크레딧을 다시 받게 된다
         self.ledger = {}      # uid -> 기록 목록
         self.refs = set()     # 모든 사용자의 ref. 데이터베이스의 unique 제약처럼 겹치면 거절한다
+        self.orders = {}      # 주문 ID -> 주문(user_id 포함). 원장처럼 내 데이터 삭제로 지우지 않는다
 
     def _user(self, uid):
         return self.users.setdefault(uid, {
@@ -132,6 +133,31 @@ class MemoryStore:
     def recent_credits(self, uid, limit):
         """최근 기록부터 limit 줄."""
         return [dict(e) for e in reversed(self.ledger.get(uid, [])[-limit:])]
+
+    # 크레딧 구매 주문
+    def create_order(self, uid, order_id, product_id, amount, credits):
+        with self.lock:
+            if order_id in self.orders:
+                raise ValueError("이미 있는 주문 ID")
+            o = {"id": order_id, "user_id": uid, "product_id": product_id, "amount": int(amount),
+                 "credits": int(credits), "status": "pending", "payment_key": None, "created_at": utcnow(),
+                 "paid_at": None}
+            self.orders[order_id] = o
+        return dict(o)
+
+    def get_order(self, uid, order_id):
+        """이 사용자의 주문만 찾는다. 남의 주문 ID면 None."""
+        o = self.orders.get(order_id)
+        return dict(o) if o and o["user_id"] == uid else None
+
+    def update_order(self, uid, order_id, status, payment_key=None):
+        """pending 인 주문만 바꾼다. 바꿨으면 바뀐 주문, 이미 다른 상태면 None."""
+        with self.lock:
+            o = self.orders.get(order_id)
+            if not o or o["user_id"] != uid or o["status"] != "pending":
+                return None
+            o.update(status=status, payment_key=payment_key, paid_at=utcnow() if status == "paid" else None)
+            return dict(o)
 
     def delete_all(self, uid):
         self.users.pop(uid, None)

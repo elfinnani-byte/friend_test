@@ -9,4 +9,6 @@ os.environ.update({"LLM_PROVIDER": "fake", "LLM_API_KEY": "", "STORAGE": "memory
 os.environ.update({"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})
 # 사진 글자 읽기(OCR)는 tesseract 프로그램이 필요하다. .env 에서 켜 두어도 테스트는 기본값(끔)으로 실행한다
 os.environ["OCR_ENABLED"] = "false"
+# 테스트는 토스페이먼츠를 부르지 않는다. .env 의 키 대신 빈 값으로 결제를 끄고, 결제 테스트는 가짜 클라이언트를 끼운다
+os.environ.update({"TOSS_CLIENT_KEY": "", "TOSS_SECRET_KEY": ""})
 os.environ.setdefault("ENV", "test")

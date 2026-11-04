@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>크레딧 충전 결과</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+:root{--bg:#f5f3ef;--surface:#fff;--line:#e8e4dd;--ink:#22201d;--ink-2:#5d5850;--accent:#f7585c;--ok:#2f8f5b;--warn:#b26a00}
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:16px;background:var(--bg);color:var(--ink);font:15px/1.6 "Pretendard Variable",Pretendard,-apple-system,system-ui,sans-serif}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:28px 24px;width:100%;max-width:420px;text-align:center}
+.icon{font-size:40px}
+h1{font-size:20px;margin:8px 0}
+p{color:var(--ink-2);margin:6px 0}
+.code{font-size:12px;color:var(--ink-2)}
+a.btn{display:inline-block;margin-top:16px;background:var(--accent);color:#fff;text-decoration:none;font-weight:600;border-radius:10px;padding:10px 18px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon" id="icon">⏳</div>
+  <h1 id="title">결제를 확인하고 있어요</h1>
+  <p id="msg">창을 닫지 말고 잠시 기다려 주세요.</p>
+  <p class="code" id="code"></p>
+  <a class="btn" href="/" id="back" hidden>대화로 돌아가기</a>
+</div>
+<script type="module">
+// 토스페이먼츠 결제위젯 v2 의 리다이렉트 결과를 처리한다.
+// 근거: https://docs.tosspayments.com/guides/v2/payment-widget/integration-window (2. 리다이렉트 URL로 이동하기)
+//   성공: /buy/success?paymentKey=&orderId=&paymentType=&amount=  → 서버(/api/orders/confirm)가 금액 확인 뒤 승인한다
+//   실패: /buy/fail?code=&message=&orderId=                       → 승인 API 를 부르지 않고 안내만 한다
+const $ = s => document.querySelector(s);
+const q = new URLSearchParams(location.search);
+function show(icon, title, msg, code, goHome) {
+  $("#icon").textContent = icon; $("#title").textContent = title; $("#msg").textContent = msg;
+  $("#code").textContent = code ? `오류 코드: ${code}` : "";
+  $("#back").hidden = false;
+  if (goHome) setTimeout(() => location.replace("/"), 2500);  // 끝나면 대화 화면으로 돌아간다
+}
+
+async function token() {
+  const r = await fetch("/api/config");
+  if (r.status === 401) { location.replace("/login"); throw new Error("입장 비밀번호 필요"); }
+  const cfg = await r.json();
+  if (cfg.auth !== "supabase") return null;
+  const {createClient} = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm");
+  const sb = createClient(cfg.supabase_url, cfg.supabase_publishable_key);
+  const {data} = await sb.auth.getSession();  // 대화 화면에서 로그인한 세션(같은 브라우저)
+  if (!data.session) throw new Error("로그인 세션 없음");
+  return data.session.access_token;
+}
+
+async function confirm() {
+  const body = {payment_key: q.get("paymentKey") || "", order_id: q.get("orderId") || "", amount: Number(q.get("amount"))};
+  if (!body.payment_key || !body.order_id || !Number.isInteger(body.amount)) {
+    return show("⚠️", "결제 정보가 없어요", "대화 화면에서 다시 충전해 주세요.", "", false);
+  }
+  let auth;
+  try { auth = await token(); }
+  catch (err) { console.error(err); return show("⚠️", "로그인을 확인하지 못했어요", "대화 화면을 연 브라우저에서 다시 시도해 주세요.", "", false); }
+  const headers = {"Content-Type": "application/json", ...(auth ? {Authorization: `Bearer ${auth}`} : {})};
+  try {
+    const r = await fetch("/api/orders/confirm", {method: "POST", headers, body: JSON.stringify(body)});
+    const data = await r.json();
+    if (r.ok) return show("🎉", `크레딧 ${data.credits.toLocaleString("ko-KR")}개를 충전했어요`, `남은 크레딧 ${data.balance.toLocaleString("ko-KR")}개. 대화 화면으로 돌아갑니다.`, "", true);
+    show("⚠️", "충전하지 못했어요", data.message || "결제를 승인하지 못했어요.", data.code, false);
+  } catch (err) {
+    console.error(err);
+    show("⚠️", "결제 결과를 확인하지 못했어요", "잠시 뒤 이 페이지를 새로 고쳐 주세요.", "", false);
+  }
+}
+
+if (location.pathname === "/buy/success") {
+  confirm();
+} else {
+  const code = q.get("code") || "";
+  const canceled = code === "PAY_PROCESS_CANCELED";
+  show(canceled ? "↩️" : "⚠️", canceled ? "결제를 취소했어요" : "결제하지 못했어요",
+       canceled ? "크레딧은 그대로예요. 대화 화면에서 언제든 다시 충전할 수 있어요." : (q.get("message") || "잠시 뒤 다시 시도해 주세요."),
+       canceled ? "" : code, false);
+}
+</script>
+</body>
+</html>

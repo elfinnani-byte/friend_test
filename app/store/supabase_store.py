@@ -161,7 +161,30 @@ class SupabaseStore:
         """최근 기록부터 limit 줄."""
         return [self._credit(r) for r in self._get("credit_ledger", user_id=f"eq.{uid}", order="id.desc", limit=limit)]
 
+    # 크레딧 구매 주문(orders)
+    def _order(self, row):
+        return {"id": row["id"], "user_id": row["user_id"], "product_id": row["product_id"], "amount": row["amount"],
+                "credits": row["credits"], "status": row["status"], "payment_key": row.get("payment_key"),
+                "created_at": parse_time(row["created_at"]), "paid_at": parse_time(row.get("paid_at"))}
+
+    def create_order(self, uid, order_id, product_id, amount, credits):
+        return self._order(self._insert("orders", {"id": order_id, "user_id": uid, "product_id": product_id,
+                                                    "amount": int(amount), "credits": int(credits)}))
+
+    def get_order(self, uid, order_id):
+        """이 사용자의 주문만 찾는다. 남의 주문 ID면 None."""
+        rows = self._get("orders", user_id=f"eq.{uid}", id=f"eq.{order_id}")
+        return self._order(rows[0]) if rows else None
+
+    def update_order(self, uid, order_id, status, payment_key=None):
+        """status 가 pending 인 행만 바꾸는 조건부 업데이트. 바꿨으면 바뀐 주문, 이미 다른 상태면 None."""
+        values = {"status": status, "payment_key": payment_key}
+        if status == "paid":
+            values["paid_at"] = iso(datetime.now(timezone.utc))
+        rows = self._update("orders", values, user_id=f"eq.{uid}", id=f"eq.{order_id}", status="eq.pending")
+        return self._order(rows[0]) if rows else None
+
     def delete_all(self, uid):
-        # credit_ledger 는 지우지 않는다. 지우면 무료 크레딧을 다시 받게 된다(계정 삭제 때는 외래 키로 함께 지워진다)
+        # orders 도 지우지 않는다(결제 기록). credit_ledger 는 지우지 않는다. 지우면 무료 크레딧을 다시 받게 된다(계정 삭제 때는 외래 키로 함께 지워진다)
         for table in ("messages", "summaries", "memories", "reminders", "characters", "user_settings"):
             self._delete(table, user_id=f"eq.{uid}")
