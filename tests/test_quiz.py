@@ -82,10 +82,11 @@ def test_easy_mode_choices_are_shown_from_one_and_answer_is_zero_based(solver):
 
 
 @pytest.mark.parametrize("answer", [0, 5, "모름", None])
-def test_out_of_range_choice_is_error(solver, answer):
+def test_out_of_range_choice_is_not_error(solver, answer):
+    # 답을 안 내면 0점이므로 502 대신, 다시 물어도 번호가 없으면 1번(choice 0)을 낸다
     solver({"answer": answer, "reason": "x"})
     r = hard(type="choice", choice_count=4)
-    assert r.status_code == 502
+    assert r.status_code == 200 and r.json() == {"choice": 0, "reason": quiz.FALLBACK_REASON}
 
 
 def test_easy_mode_image_url_is_passed(solver):
@@ -681,3 +682,85 @@ def test_submit_log_with_numeric_question_id_keeps_type(solver, quiz_server, cap
 def test_non_json_response_is_cut():
     assert quiz.response_for_log(None, "x" * 1000) == "x" * 300
     assert quiz.response_for_log({"token": "t", "Reason": "r", "ok": 1}, "") == {"ok": 1}
+
+
+
+# ── 객관식 번호를 못 찾을 때: 여러 모양 읽기, 다시 묻기, 1번 내기 ─────────────
+
+class SequenceLLM:
+    """부를 때마다 준비한 답을 차례로 돌려준다. 예외를 넣으면 그 예외를 낸다."""
+    model = "sequence"
+
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), []
+
+    def complete_vision_json(self, system, text, image, max_tokens, trace_input):
+        self.calls.append({"system": system, "text": text, "image": image})
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(answer)
+
+
+def use_llm(llm):
+    main.app.dependency_overrides[main.get_quiz_llm] = lambda: llm
+    return llm
+
+
+@pytest.mark.parametrize("value, number", [
+    (2, 2), ("2", 2), ("2번", 2), ("2.", 2), ("(2)", 2), ("②", 2), ("２", 2), ("❷", 2), ("보기 3", 3),
+    (" ④ 번 ", 4), (2.0, 2), ("0번, 아니 2번", 2),
+])
+def test_choice_number_shapes(value, number):
+    assert quiz.choice_number(value, 4) == number
+
+
+@pytest.mark.parametrize("value", [None, True, 0, 5, "모름", "", 2.5, "⑤"])
+def test_choice_number_none(value):
+    assert quiz.choice_number(value, 4) is None
+
+
+@pytest.mark.parametrize("value, choice", [("②", 1), ("3번", 2), ("(4)", 3), ("1.", 0)])
+def test_hard_mode_reads_number_shapes_without_retry(solver, value, choice):
+    llm = use_llm(SequenceLLM({"answer": value, "reason": "r"}))
+    assert hard(type="choice", choice_count=4).json() == {"choice": choice, "reason": "r"}
+    assert len(llm.calls) == 1  # 번호를 읽었으므로 다시 묻지 않는다
+
+
+def test_retry_asks_number_only_once(solver):
+    llm = use_llm(SequenceLLM({"answer": "잘 모르겠음", "reason": "화면이 흐리다"}, {"answer": 3}))
+    r = hard(type="choice", choice_count=4)
+    assert r.status_code == 200 and r.json() == {"choice": 2, "reason": "화면이 흐리다"}
+    assert len(llm.calls) == 2 and llm.calls[1]["system"] == quiz.RETRY_SYSTEM
+    assert llm.calls[1]["image"] == llm.calls[0]["image"]  # 같은 사진으로 다시 묻는다
+
+
+def test_retry_after_unreadable_model_output(solver):
+    # 첫 답이 JSON 이 아니어서 읽지 못해도(예외) 번호만 다시 묻는다
+    llm = use_llm(SequenceLLM(ValueError("JSON 응답을 찾지 못했습니다."), {"answer": "②"}))
+    r = hard(type="choice", choice_count=4)
+    assert r.json() == {"choice": 1, "reason": "보기 번호만 다시 물어 고른 답입니다."} and len(llm.calls) == 2
+
+
+def test_fallback_to_first_when_retry_fails(solver, capsys):
+    llm = use_llm(SequenceLLM({"answer": "모름", "reason": "r"}, RuntimeError("모델 오류")))
+    r = hard(type="choice", choice_count=4)
+    assert r.status_code == 200 and r.json() == {"choice": 0, "reason": quiz.FALLBACK_REASON}
+    assert len(llm.calls) == 2  # 다시 묻기는 한 번만
+    assert '"fallback_first"' in capsys.readouterr().out
+
+
+def test_fallback_answer_is_submitted(solver, quiz_server):
+    # 1번이라도 퀴즈 서버에 낸다(답을 안 내면 0점)
+    import json as _json
+    seen, _ = quiz_server
+    use_llm(SequenceLLM({"answer": None, "reason": "r"}, {"answer": "모름"}))
+    r = client.post("/api/quiz/solve", files={"photo": ("q.png", PNG, "image/png")},
+                    data={"type": "choice", "choice_count": "4", **submit_fields()})
+    assert r.json()["submitted"] is True and r.json()["choice"] == 0
+    assert _json.loads(seen[0].content)["choice"] == 0
+
+
+def test_short_answer_failure_is_still_502(solver):
+    use_llm(SequenceLLM(ValueError("JSON 응답을 찾지 못했습니다.")))
+    assert hard(type="short").status_code == 502

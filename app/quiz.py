@@ -8,6 +8,7 @@
 import difflib
 import io
 import re
+import unicodedata
 import threading
 import time
 from collections import defaultdict, deque
@@ -36,6 +37,40 @@ SYSTEM = "\n".join([
     "- reason 에 답을 고른 이유를 한국어 한 문장으로 짧게 쓴다.",
     "- JSON 하나로만 답한다.",
 ])
+# 객관식에서 첫 답에 보기 번호가 없을 때 한 번 더 짧게 묻는 지시문
+RETRY_SYSTEM = "\n".join([
+    "너는 퀴즈 대결에서 객관식 문제를 푸는 선수다. 정답 보기 번호 하나만 고른다.",
+    "- 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로). 확실하지 않아도 가장 그럴듯한 번호 하나를 고른다.",
+    '- JSON 하나로만 답한다: {"answer": 번호}',
+])
+FALLBACK_REASON = "보기 번호를 읽지 못해 1번을 냈습니다."
+
+
+class NoChoice(Exception):
+    """모델 답에서 보기 번호를 찾지 못했다. 한 번 더 묻거나 1번을 낸다(답을 안 내면 0점이므로 502 를 내지 않는다)."""
+
+    def __init__(self, reason=""):
+        super().__init__("no choice")
+        self.reason = reason
+
+
+# NFKC 가 바꾸지 않는 동그라미 숫자(❶~❿, ➀~➉, ➊~➓)
+DINGBAT_DIGITS = {start + i: f" {i + 1} " for start in (0x2776, 0x2780, 0x278A) for i in range(10)}
+
+
+def choice_number(value, count):
+    """모델이 낸 보기 번호(1부터)를 읽는다. 2, "2", "2번", "2.", "(2)", "②", "２" 모두 2. 범위 안 번호가 없으면 None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value == int(value) and 1 <= value <= count else None
+    text = unicodedata.normalize("NFKC", str(value)).translate(DINGBAT_DIGITS)  # ① → 1, 전각 ２ → 2, ❷ → 2
+    for found in re.findall(r"\d+", text):
+        if 1 <= int(found) <= count:
+            return int(found)
+    return None
+
+
 NUMBER_ONLY = re.compile(r"숫자\s*(만|로)|아라비아\s*숫자")
 
 
@@ -158,8 +193,7 @@ def to_result(answer, count, choices=None, question=None):
     reason = str(answer.get("reason", "")).strip()[:300]
     value, notes = answer.get("answer"), []
     if count:
-        match = re.search(r"\d+", str(value))
-        number = int(match.group(0)) if match else 0
+        number = choice_number(value, count) or 0
         read = choices if choices else answer.get("choices_read")
         read = [str(c) for c in read][:count] if isinstance(read, list) else []
         by_text = match_choice(answer.get("answer_text"), read)
@@ -167,7 +201,7 @@ def to_result(answer, count, choices=None, question=None):
             notes.append("number_from_text")
             number = by_text + 1
         if not 1 <= number <= count:
-            raise QuizError(502, "모델 답에서 보기 번호를 찾지 못했습니다.")
+            raise NoChoice(reason)
         return {"choice": number - 1, "reason": reason}, notes
     text = str(value if value is not None else "").strip()
     if not text:

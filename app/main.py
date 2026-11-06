@@ -282,12 +282,19 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         try:
             answer, ms["llm"] = await run_in_threadpool(call)
             clock = time.perf_counter()
+            result, notes = quiz.to_result(answer, count, trace.get("choices"), trace.get("question"))
         except quiz.QuizError:
             raise
         except Exception as error:
-            log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
-            raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
-        result, notes = quiz.to_result(answer, count, trace.get("choices"), trace.get("question"))
+            if not count:  # 단답은 그대로 실패로 알린다
+                log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
+                raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
+            # 객관식은 답을 안 내면 0점이다. 번호를 못 찾았거나 답을 읽지 못했으면 번호만 한 번 더 묻고, 그래도 없으면 1번을 낸다
+            log("WARNING", "퀴즈 보기 번호를 다시 물음", mode=trace["mode"], error=type(error).__name__)
+            clock = time.perf_counter()
+            result, notes = await run_in_threadpool(retry_choice, model, text, image, count, trace,
+                                                    getattr(error, "reason", ""))
+            lap("llm_retry")
         lap("respond")
         if target is not None:
             answer_part = {k: result[k] for k in ("choice", "text") if k in result}
@@ -307,6 +314,24 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         total_ms=sum(ms.values()), photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
         submit=target is not None)
     return result
+
+
+def retry_choice(model, text, image, count, trace, first_reason):
+    """객관식 번호만 한 번 더 짧게 묻는다. 그래도 번호가 없거나 호출이 실패하면 1번(choice 0)을 낸다."""
+    try:
+        with tracing.observe("quiz-retry-choice", "generation", model=model.model, input=trace,
+                             metadata={"mode": trace["mode"], "type": trace["type"]}):
+            again = model.complete_vision_json(quiz.RETRY_SYSTEM, text + "\n보기 번호만 답한다.", image, QUIZ_MAX_TOKENS,
+                                               trace)
+        number = quiz.choice_number(again.get("answer") if isinstance(again, dict) else None, count)
+    except Exception as error:
+        log("WARNING", "퀴즈 보기 번호 다시 묻기 실패", error=type(error).__name__)
+        number = None
+    if number is not None:
+        reason = first_reason or "보기 번호만 다시 물어 고른 답입니다."
+        return {"choice": number - 1, "reason": reason[:300]}, ["retry_number"]
+    log("WARNING", "퀴즈 보기 번호를 못 찾아 1번을 냄", mode=trace["mode"])
+    return {"choice": 0, "reason": quiz.FALLBACK_REASON}, ["fallback_first"]
 
 
 def submit_target(fields):
