@@ -590,3 +590,94 @@ def test_claude_system_prompt_is_cached():
     system = plain.kwargs["system"]
     assert system[0]["cache_control"] == {"type": "ephemeral"} and system[0]["text"].startswith("지시")
     assert plain.kwargs["messages"][0]["content"] == [{"type": "text", "text": "[단답]"}]  # 매번 다른 글은 캐시 지점 뒤
+
+
+# ── QUIZ_SERVER_SUBMIT 스위치 ───────────────────────────────────────
+
+def test_submit_switch_off_returns_answer_only(solver, quiz_server, monkeypatch):
+    # 꺼 두면 제출 정보가 와도 퀴즈 서버에 내지 않고, 예전 응답 모양 그대로 답만 돌려준다(앱이 직접 낸다)
+    seen, _ = quiz_server
+    monkeypatch.setattr(main.settings, "quiz_server_submit", False)
+    solver({"answer": 2, "answer_text": "서울", "reason": "r"})
+    r = easy(type="choice", question="수도는?", choices=["부산", "서울", "대구"], **submit_fields())
+    assert r.status_code == 200 and r.json() == {"choice": 1, "reason": "r"}
+    solver({"answer": "5", "reason": "r"})
+    r = client.post("/api/quiz/solve", files={"photo": ("q.png", PNG, "image/png")}, data={"type": "short", **submit_fields()})
+    assert r.json() == {"text": "5", "reason": "r"}
+    assert seen == []
+
+
+def test_submit_switch_off_ignores_disallowed_server(solver, quiz_server, monkeypatch, capsys):
+    # 꺼 두면 제출 정보를 검사하지 않으므로, 허용 목록 밖 주소여도 400 없이 답을 돌려준다. 토큰은 여전히 남기지 않는다
+    seen, _ = quiz_server
+    monkeypatch.setattr(main.settings, "quiz_server_submit", False)
+    solver({"answer": "5", "reason": "r"})
+    r = easy(type="short", question="몇 개?", **submit_fields(quiz_server="https://evil.example.com"))
+    assert r.status_code == 200 and r.json() == {"text": "5", "reason": "r"} and seen == []
+    out = capsys.readouterr().out
+    assert TEAM_TOKEN not in out and '"퀴즈 답 제출"' not in out
+
+
+def test_submit_switch_on_still_submits(solver, quiz_server, monkeypatch):
+    seen, _ = quiz_server
+    monkeypatch.setattr(main.settings, "quiz_server_submit", True)
+    solver({"answer": "5", "reason": "r"})
+    assert easy(type="short", question="몇 개?", **submit_fields()).json()["submitted"] is True and len(seen) == 1
+
+
+@pytest.mark.parametrize("value, expected", [(None, True), ("", True), ("true", True), ("false", False),
+                                             ("False", False), ("0", False), ("off", False)])
+def test_submit_switch_env(monkeypatch, value, expected):
+    from app.config import load_settings
+    if value is None:
+        monkeypatch.delenv("QUIZ_SERVER_SUBMIT", raising=False)
+    else:
+        monkeypatch.setenv("QUIZ_SERVER_SUBMIT", value)
+    assert load_settings().quiz_server_submit is expected
+
+
+# ── 제출 로그: 보낸 답과 퀴즈 서버 응답 ──────────────────────────────
+
+def submit_log(out):
+    import json as _json
+    return [_json.loads(x) for x in out.splitlines() if '"퀴즈 답 제출"' in x]
+
+
+def test_submit_log_has_sent_answer_and_response(solver, quiz_server, capsys):
+    _, reply = quiz_server
+    reply.update(json={"ok": True, "elapsed": 1.5, "reason": "echo 이유 글은 남기지 않음"})
+    solver({"answer": 2, "answer_text": "서울", "reason": "서울이 수도라서 고른 아주 비밀스러운 이유"})
+    easy(type="choice", question="수도는?", choices=["부산", "서울", "대구"], **submit_fields())
+    solver({"answer": "5개", "number_only": True, "reason": "다섯 개라서 고른 이유"})
+    client.post("/api/quiz/solve", files={"photo": ("q.png", PNG, "image/png")}, data={"type": "short", **submit_fields()})
+    out = capsys.readouterr().out
+    logs = submit_log(out)
+    assert logs[0]["sent"] == {"question_id": "q-7", "question_id_type": "str", "choice": 1, "choice_type": "int"}
+    assert logs[1]["sent"] == {"question_id": "q-7", "question_id_type": "str", "text": "5", "text_type": "str"}
+    assert logs[0]["response"] == {"ok": True, "elapsed": 1.5}  # 응답의 reason 칸은 뺀다
+    assert TEAM_TOKEN not in out and "비밀스러운 이유" not in out and "다섯 개라서" not in out and "echo 이유" not in out
+
+
+def test_submit_log_on_rejection_has_response_body(solver, quiz_server, capsys):
+    _, reply = quiz_server
+    reply.update(status=409, json={"detail": "이미 답을 냈습니다"})
+    solver({"answer": "7", "reason": "r"})
+    easy(type="short", question="?", **submit_fields())
+    log = submit_log(capsys.readouterr().out)[0]
+    assert log["severity"] == "WARNING" and log["status"] == 409 and log["ok"] is False
+    assert log["response"] == {"detail": "이미 답을 냈습니다"} and log["sent"]["text"] == "7"
+
+
+def test_submit_log_with_numeric_question_id_keeps_type(solver, quiz_server, capsys):
+    # 타입 비교용: JSON 으로 숫자 question_id 가 오면 그대로 보내고 로그에 int 로 남는다
+    import json as _json
+    seen, _ = quiz_server
+    solver({"answer": "7", "reason": "r"})
+    easy(type="short", question="?", **submit_fields(question_id=12))
+    assert _json.loads(seen[0].content)["question_id"] == 12
+    assert submit_log(capsys.readouterr().out)[0]["sent"]["question_id_type"] == "int"
+
+
+def test_non_json_response_is_cut():
+    assert quiz.response_for_log(None, "x" * 1000) == "x" * 300
+    assert quiz.response_for_log({"token": "t", "Reason": "r", "ok": 1}, "") == {"ok": 1}
