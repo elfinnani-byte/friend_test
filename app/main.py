@@ -8,19 +8,21 @@
 - /api/greeting: 앱을 열 때 먼저 말 걸기
 - /api/ocr: 사진 속 글자 읽기(OCR_ENABLED=true 일 때)
 - /api/memories, /api/reminders, /api/data: 기억, 약속, 내 데이터 관리
+- /api/quiz/solve: 퀴즈 대결 앱의 문제 풀기(QUIZ_SOLVER_ENABLED=true 일 때만, quiz.py)
 """
 import html
 import json
 import os
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, gate, ocr, tracing, when
+from app import agent, gate, ocr, quiz, tracing, when
 from app.auth import Auth, User
-from app.config import ROOT, load_settings
+from app.config import QUIZ_MAX_PHOTO_BYTES, QUIZ_MAX_TOKENS, ROOT, load_settings
 from app.llm import make_llm
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
@@ -30,6 +32,8 @@ from app.tools import CITIES
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
 tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는다. 키가 없으면 꺼진다
 llm = make_llm(settings)
+quiz_llm = make_llm(settings, settings.quiz_model) if settings.quiz_enabled else None
+quiz_limiter = quiz.RateLimiter(settings.quiz_rate_per_minute)
 store = make_store(settings)
 current_user = Auth(settings)
 
@@ -63,6 +67,10 @@ if gate.enabled():
 def get_llm():
     """테스트에서는 이 함수를 가짜 LLM을 돌려주는 함수로 바꿔 끼운다."""
     return llm
+
+
+def get_quiz_llm():
+    return quiz_llm
 
 
 class ChatRequest(BaseModel):
@@ -199,6 +207,57 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
         return {"text": ocr.read_text(await photo.read())}
     except ocr.OcrError as error:
         raise HTTPException(500, str(error)) from error
+
+
+@app.post("/api/quiz/solve")
+async def solve_quiz(request: Request, model=Depends(get_quiz_llm)):
+    """문제 하나를 푼다. JSON(이지모드) 또는 multipart 사진(하드모드). 크레딧은 차감하지 않는다."""
+    if not settings.quiz_enabled or model is None:
+        raise HTTPException(404, "Not Found")  # 꺼져 있으면 없는 주소처럼 보인다
+    if not quiz_limiter.allow(quiz.client_ip(request)):
+        return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
+                            status_code=429)
+    try:
+        if request.headers.get("content-type", "").startswith("multipart/form-data"):
+            # 본문을 읽기 전에 크기부터 본다(사진 5MB + 폼 여유). 읽은 뒤에도 사진 크기를 다시 확인한다
+            if int(request.headers.get("content-length") or 0) > QUIZ_MAX_PHOTO_BYTES + 64 * 1024:
+                raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
+            form = await request.form()
+            photo = form.get("photo")
+            if photo is None or not hasattr(photo, "read"):
+                raise quiz.QuizError(400, "photo 파일이 필요합니다.")
+            data = await photo.read(QUIZ_MAX_PHOTO_BYTES + 1)
+            if len(data) > QUIZ_MAX_PHOTO_BYTES:
+                raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
+            text, image, count, trace = quiz.hard_request(form.get("type"), form.get("choice_count"), data,
+                                                          photo.content_type)
+        else:
+            try:
+                body = await request.json()
+            except ValueError:
+                raise quiz.QuizError(400, "JSON 또는 multipart 사진을 보내 주세요.") from None
+            text, image, count, trace = quiz.easy_request(body)
+
+        def call():
+            # 모델은 한 번만 부른다. Langfuse 에는 사진 내용 대신 크기와 종류만 남긴다
+            with tracing.observe("quiz-solve", "generation", model=model.model, input=trace,
+                                 metadata={"mode": trace["mode"], "type": trace["type"]}):
+                answer = model.complete_vision_json(quiz.SYSTEM, text, image, QUIZ_MAX_TOKENS, trace)
+            tracing.flush()
+            return answer
+
+        try:
+            answer = await run_in_threadpool(call)
+        except quiz.QuizError:
+            raise
+        except Exception as error:
+            log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
+            raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
+        result = quiz.to_result(answer, count)
+    except quiz.QuizError as error:
+        return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
+    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"])
+    return result
 
 
 def own_reply(user, message_id):

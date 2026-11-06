@@ -20,6 +20,10 @@ PROVIDERS = {
     "fake": {"base_url": None, "model": "fake"},
 }
 
+# 퀴즈 풀기 API(/api/quiz/solve). 아무나 LLM 을 쓰지 못하게 기본은 꺼 두고, 사진 크기와 IP 당 요청 수를 제한한다
+QUIZ_MAX_PHOTO_BYTES = 5 * 1024 * 1024
+QUIZ_MAX_TOKENS = 1024            # 출력 상한. Claude 는 생각 토큰도 여기에 들어가므로 답이 잘리지 않을 만큼만 둔다
+
 
 @dataclass
 class Settings:
@@ -38,6 +42,9 @@ class Settings:
     google_login: bool
     show_turn_panel: bool
     ocr_enabled: bool
+    quiz_enabled: bool        # QUIZ_SOLVER_ENABLED=true 일 때만 /api/quiz/solve 가 열린다
+    quiz_model: str           # 이미지를 읽는 모델. 없으면 대화 모델과 같다
+    quiz_rate_per_minute: int # IP 하나가 1분에 보낼 수 있는 퀴즈 요청 수
 
 
 def load_dotenv(path):
@@ -111,7 +118,11 @@ def load_settings():
         # 개발용 "이번 턴" 패널. production 에서는 기본으로 끈다.
         show_turn_panel=env_flag("SHOW_TURN_PANEL", env != "production"),
         ocr_enabled=env_flag("OCR_ENABLED", False),  # 사진 글자 읽기. tesseract 프로그램이 필요하다
+        quiz_enabled=os.environ.get("QUIZ_SOLVER_ENABLED", "").strip().lower() == "true",
+        quiz_model=os.environ.get("QUIZ_MODEL", "").strip() or os.environ.get("LLM_MODEL", "").strip() or defaults["model"],
+        quiz_rate_per_minute=int(os.environ.get("QUIZ_RATE_PER_MINUTE", "10") or 10),
     )
     log("INFO", "앱을 시작합니다.", provider=settings.provider, model=settings.model, env=settings.env,
-        storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel)
+        storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel,
+        quiz=settings.quiz_enabled, quiz_model=settings.quiz_model if settings.quiz_enabled else None)
     return settings
