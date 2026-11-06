@@ -6,7 +6,9 @@ fake 는 키 없이 화면과 흐름을 확인하거나 테스트할 때 쓰는 
 
 세 클래스 모두 호출이 끝나면 tracing.record 로 같은 내용을 남긴다: 실제로 답한 모델, 보낸 메시지, 답, 입력·출력 토큰 수.
 complete_json, complete_text 는 지금 열린 generation 에, chat_stream 은 넘겨받은 observation 에 적는다.
+complete_vision_json(퀴즈 풀기)은 이미지 한 장과 함께 한 번만 부르고, 트레이스에는 이미지 대신 trace_input 을 남긴다.
 """
+import base64
 import json
 import re
 import time
@@ -44,6 +46,22 @@ class OpenAICompatibleLLM:
         text = response.choices[0].message.content.strip()
         self.record(None, response.model, messages, text, response.usage)
         return text
+
+    def complete_vision_json(self, system, text, image, max_tokens, trace_input):
+        """이미지 한 장(image: {"url"} 또는 {"data", "media_type"})과 질문으로 JSON 하나를 받는다."""
+        content = [{"type": "text", "text": text}]
+        if image is not None:
+            url = image["url"] if "url" in image else \
+                f"data:{image['media_type']};base64,{base64.b64encode(image['data']).decode()}"
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        # OpenAI 주소는 max_completion_tokens, 호환 주소(Gemini)는 max_tokens 로 출력 상한을 준다
+        limit = {"max_completion_tokens": max_tokens} if self.stream_usage else {"max_tokens": max_tokens}
+        response = self.client.chat.completions.create(
+            model=self.model, response_format={"type": "json_object"}, **limit,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": content}])
+        answer = response.choices[0].message.content
+        self.record(None, response.model, trace_input, answer, response.usage)
+        return json.loads(answer)
 
     def chat_stream(self, messages, observation=None):
         """답을 만들어지는 대로 조금씩 돌려준다(스트리밍)."""
@@ -133,6 +151,30 @@ class ClaudeLLM:
         self.record(None, response, messages, text)
         return text
 
+    # 서버 쪽 대체 모델(fallbacks)을 받는 모델. Haiku 등 다른 모델에는 보내지 않는다
+    FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
+
+    def complete_vision_json(self, system, text, image, max_tokens, trace_input):
+        """이미지 한 장과 질문으로 JSON 하나를 받는다. 빠른 응답을 위해 effort low, 출력 상한 max_tokens."""
+        if image is None:
+            content = [{"type": "text", "text": text}]
+        else:
+            source = {"type": "url", "url": image["url"]} if "url" in image else \
+                {"type": "base64", "media_type": image["media_type"], "data": base64.standard_b64encode(image["data"]).decode()}
+            content = [{"type": "image", "source": source}, {"type": "text", "text": text}]
+        system = system + "\n\n반드시 JSON 객체 하나만 출력한다. 설명이나 코드 블록 표시는 붙이지 않는다."
+        request = dict(model=self.model, max_tokens=max_tokens, system=system, output_config=self.OUTPUT_CONFIG,
+                       messages=[{"role": "user", "content": content}])
+        if self.model in self.FALLBACK_MODELS:
+            response = self.client.beta.messages.create(**request, betas=self.BETAS, fallbacks="default")
+        else:
+            response = self.client.messages.create(**request)
+        answer = self._text(response)
+        self.record(None, response, trace_input, answer)
+        if response.stop_reason == "refusal":
+            raise ValueError("Claude가 요청을 거절했습니다.")
+        return parse_json_object(answer)
+
     def chat_stream(self, messages, observation=None):
         """답을 만들어지는 대로 조금씩 돌려준다(스트리밍)."""
         system, turns = self.to_claude(messages)
@@ -198,6 +240,12 @@ class FakeLLM:
         tracing.record(None, model=self.model, input=messages, output=text)
         return text
 
+    def complete_vision_json(self, system, text, image, max_tokens, trace_input):
+        """퀴즈 풀기 가짜 답. 객관식은 화면 번호 1, 단답은 '가짜 답'."""
+        answer = {"answer": 1 if "[객관식]" in text else "가짜 답", "reason": "(가짜 응답) 정해 둔 답입니다."}
+        tracing.record(None, model=self.model, input=trace_input, output=json.dumps(answer, ensure_ascii=False))
+        return answer
+
     def chat_stream(self, messages, observation=None):
         text = self._reply(messages)
         for i in range(0, len(text), 4):
@@ -209,9 +257,11 @@ class FakeLLM:
             tracing.record(observation, model=self.model, input=messages, output=text)
 
 
-def make_llm(settings):
+def make_llm(settings, model=None):
+    """model 을 주면 그 모델로 만든다(퀴즈 풀기의 QUIZ_MODEL). 키와 제공자는 같다."""
+    model = model or settings.model
     if settings.provider == "fake":
         return FakeLLM()
     if settings.provider == "claude":
-        return ClaudeLLM(settings.api_key, settings.model)
-    return OpenAICompatibleLLM(settings.api_key, settings.model, settings.base_url)
+        return ClaudeLLM(settings.api_key, model)
+    return OpenAICompatibleLLM(settings.api_key, model, settings.base_url)
