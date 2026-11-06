@@ -14,6 +14,7 @@ import html
 import json
 import os
 import time
+from urllib.parse import urlsplit
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -34,6 +35,9 @@ tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는�
 llm = make_llm(settings)
 quiz_llm = make_llm(settings, settings.quiz_model) if settings.quiz_enabled else None
 quiz_limiter = quiz.RateLimiter(settings.quiz_rate_per_minute)
+quiz_submitter = quiz.AnswerSubmitter()  # 퀴즈 서버 연결을 재사용한다(만들 때 연결하지 않는다)
+for _pattern in settings.quiz_server_allowlist:
+    quiz.server_pattern(_pattern)  # 허용 목록이 잘못 적혔으면 시작할 때 바로 알린다
 store = make_store(settings)
 current_user = Auth(settings)
 
@@ -213,6 +217,9 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
 async def solve_quiz(request: Request, background: BackgroundTasks, model=Depends(get_quiz_llm)):
     """문제 하나를 푼다. JSON(이지모드) 또는 multipart 사진(하드모드). 크레딧은 차감하지 않는다.
 
+    quiz_server, token, question_id 를 함께 보내면 답을 정한 뒤 퀴즈 서버에 바로 제출하고
+    submitted, answer_status, elapsed 를 함께 돌려준다. 셋 다 없으면 예전처럼 답만 돌려준다.
+
     Langfuse 트레이스는 응답을 보낸 뒤 보낸다(답이 0.2초쯤 빨라진다). Cloud Run 은 CPU 를 요청 중에만 주는 설정이면
     응답 뒤 작업이 멈출 수 있으므로, 이 API 를 쓰는 동안 서비스에 --no-cpu-throttling 을 건다.
     """
@@ -245,6 +252,8 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             data = await photo.read(QUIZ_MAX_PHOTO_BYTES + 1)
             if len(data) > QUIZ_MAX_PHOTO_BYTES:
                 raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
+            # 제출 정보는 모델을 부르기 전에 검사한다(허용되지 않은 주소면 모델 비용 없이 400)
+            target = quiz.submit_target(form, settings.quiz_server_allowlist)
             text, image, count, trace = quiz.hard_request(form.get("type"), form.get("choice_count"), data,
                                                           photo.content_type)
             if settings.quiz_image_max_side:
@@ -259,6 +268,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             except ValueError:
                 raise quiz.QuizError(400, "JSON 또는 multipart 사진을 보내 주세요.") from None
             lap("receive")
+            target = quiz.submit_target(body if isinstance(body, dict) else {}, settings.quiz_server_allowlist)
             text, image, count, trace = quiz.easy_request(body)
 
         def call():
@@ -279,10 +289,22 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
         result, notes = quiz.to_result(answer, count, trace.get("choices"), trace.get("question"))
         lap("respond")
+        if target is not None:
+            answer_part = {k: result[k] for k in ("choice", "text") if k in result}
+            status, elapsed, problem = await run_in_threadpool(quiz_submitter.submit, target, answer_part,
+                                                               result["reason"])
+            lap("submit")
+            result.update(submitted=problem is None, answer_status=status, elapsed=elapsed)
+            if problem:
+                result["submit_error"] = problem
+            # 토큰은 남기지 않는다. 어느 서버(호스트)에 냈는지와 결과만 남긴다
+            log("INFO" if problem is None else "WARNING", "퀴즈 답 제출", host=urlsplit(target["base"]).hostname,
+                status=status, ok=problem is None, ms=ms.get("submit"))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
     log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], fixed=notes, ms=ms,
-        total_ms=sum(ms.values()), photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"))
+        total_ms=sum(ms.values()), photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
+        submit=target is not None)
     return result
 
 

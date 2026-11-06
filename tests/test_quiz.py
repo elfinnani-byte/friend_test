@@ -438,3 +438,155 @@ def test_trace_is_flushed_once_even_on_error(solver, monkeypatch, call):
     monkeypatch.setattr(tracing, "flush", lambda: flushed.append(1))
     solver({"answer": "  ", "reason": "r"})  # 단답이 비어 502
     assert call().status_code in (400, 502) and flushed == [1]
+
+
+# ── 퀴즈 서버에 답 바로 제출 ─────────────────────────────────────────
+
+QUIZ_SERVER = "https://quiz-battle-abc123-uc.us-central1.run.app"
+TEAM_TOKEN = "team-token-for-tests-only-0001"
+
+
+@pytest.fixture
+def quiz_server(monkeypatch):
+    """퀴즈 서버 대신 MockTransport. 받은 요청을 기록하고 정해 둔 응답을 돌려준다."""
+    import httpx
+    seen = []
+    reply = {"status": 200, "json": {"ok": True, "elapsed": 3.21}}
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(reply["status"], json=reply["json"])
+
+    submitter = quiz.AnswerSubmitter()
+    submitter.http = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    monkeypatch.setattr(main, "quiz_submitter", submitter)
+    monkeypatch.setattr(main.settings, "quiz_server_allowlist", ["https://quiz-battle*.us-central1.run.app"])
+    return seen, reply
+
+
+def submit_fields(**extra):
+    return {"quiz_server": QUIZ_SERVER, "token": TEAM_TOKEN, "question_id": "q-7", **extra}
+
+
+def test_easy_mode_submits_answer_to_quiz_server(solver, quiz_server):
+    import json as _json
+    seen, _ = quiz_server
+    solver({"answer": 2, "answer_text": "서울", "reason": "서울이 수도다."})
+    r = easy(type="choice", question="수도는?", choices=["부산", "서울", "대구"], **submit_fields())
+    assert r.status_code == 200
+    assert r.json() == {"choice": 1, "reason": "서울이 수도다.", "submitted": True, "answer_status": 200, "elapsed": 3.21}
+    req = seen[0]
+    assert str(req.url) == f"{QUIZ_SERVER}/api/answer" and req.method == "POST"
+    assert req.headers["authorization"] == f"Bearer {TEAM_TOKEN}"
+    assert _json.loads(req.content) == {"question_id": "q-7", "choice": 1, "reason": "서울이 수도다."}
+
+
+def test_hard_mode_submits_text_answer(solver, quiz_server):
+    import json as _json
+    seen, _ = quiz_server
+    solver({"answer": "5개", "number_only": True, "reason": "다섯 개다."})
+    r = client.post("/api/quiz/solve", files={"photo": ("q.png", PNG, "image/png")},
+                    data={"type": "short", **submit_fields()})
+    assert r.json() == {"text": "5", "reason": "다섯 개다.", "submitted": True, "answer_status": 200, "elapsed": 3.21}
+    assert _json.loads(seen[0].content) == {"question_id": "q-7", "text": "5", "reason": "다섯 개다."}
+
+
+def test_quiz_server_rejection_is_reported_not_raised(solver, quiz_server):
+    seen, reply = quiz_server
+    reply.update(status=409, json={"detail": "이미 답을 냈습니다"})
+    solver({"answer": "5", "reason": "r"})
+    r = easy(type="short", question="몇 개?", **submit_fields())
+    body = r.json()
+    assert r.status_code == 200 and body["text"] == "5"  # 답은 그대로 돌려준다
+    assert body["submitted"] is False and body["answer_status"] == 409 and body["submit_error"] == "이미 답을 냈습니다"
+
+
+@pytest.mark.parametrize("server", [
+    "http://quiz-battle-abc.us-central1.run.app",           # https 아님
+    "https://evil.example.com",                             # 목록 밖
+    "https://quiz-battle.evil.com",
+    "https://quiz-battle-x.evil.us-central1.run.app.evil.com",
+    "https://my-quiz-battle.us-central1.run.app",           # quiz-battle 로 시작하지 않음
+    "https://quiz-battle-x.evil.us-central1.run.app",       # * 는 점을 넘지 못한다
+    "https://quiz-battle-x.us-east1.run.app",               # 다른 리전
+    "https://user@quiz-battle-x.us-central1.run.app",       # 사용자 정보
+    "https://quiz-battle-x.us-central1.run.app:8443",       # 다른 포트
+    "https://quiz-battle-x.us-central1.run.app/api",        # 경로
+    "https://quiz-battle-x.us-central1.run.app?x=1",        # 쿼리
+])
+def test_disallowed_quiz_server_is_400_without_model_or_submit(solver, quiz_server, server):
+    seen, _ = quiz_server
+    llm = solver({"answer": "5", "reason": "r"})
+    r = easy(type="short", question="몇 개?", **submit_fields(quiz_server=server))
+    assert r.status_code == 400 and "허용되지 않은" in r.json()["message"]
+    assert llm.calls == [] and seen == []  # 모델도 부르지 않고 제출도 하지 않는다
+
+
+@pytest.mark.parametrize("server", ["https://quiz-battle.us-central1.run.app", f"{QUIZ_SERVER}/",
+                                   "https://QUIZ-BATTLE-x.us-central1.run.app"])
+def test_allowed_server_forms(server):
+    assert quiz.allowed_server(server, ["https://quiz-battle*.us-central1.run.app"]) is not None
+
+
+@pytest.mark.parametrize("missing", ["quiz_server", "token", "question_id"])
+def test_partial_submit_fields_are_400(solver, quiz_server, missing):
+    seen, _ = quiz_server
+    llm = solver({"answer": "5", "reason": "r"})
+    fields = submit_fields()
+    fields.pop(missing)
+    r = easy(type="short", question="몇 개?", **fields)
+    assert r.status_code == 400 and llm.calls == [] and seen == []
+
+
+def test_allowlist_env_is_read(monkeypatch):
+    from app.config import load_settings
+    monkeypatch.setenv("QUIZ_SERVER_ALLOWLIST", "https://quiz-battle*.us-central1.run.app, https://my-quiz.example.com")
+    assert load_settings().quiz_server_allowlist == ["https://quiz-battle*.us-central1.run.app",
+                                                     "https://my-quiz.example.com"]
+    monkeypatch.delenv("QUIZ_SERVER_ALLOWLIST")
+    assert load_settings().quiz_server_allowlist == ["https://quiz-battle*.us-central1.run.app"]
+
+
+def test_token_is_not_in_logs_or_trace(solver, quiz_server, capsys):
+    llm = solver({"answer": 2, "answer_text": "서울", "reason": "r"})
+    easy(type="choice", question="수도는?", choices=["부산", "서울"], **submit_fields())
+    client.post("/api/quiz/solve", files={"photo": ("q.png", PNG, "image/png")},
+                data={"type": "choice", "choice_count": "4", **submit_fields()})
+    easy(type="short", question="?", **submit_fields(quiz_server="https://evil.example.com"))  # 거절되는 경우도
+    out = capsys.readouterr().out
+    assert TEAM_TOKEN not in out
+    assert '"퀴즈 답 제출"' in out and "quiz-battle-abc123-uc.us-central1.run.app" in out  # 호스트와 결과는 남긴다
+    assert all(TEAM_TOKEN not in str(call["trace"]) and TEAM_TOKEN not in call["text"] for call in llm.calls)
+
+
+def test_old_inputs_still_work_without_submit(solver, quiz_server):
+    # 첫 APK 처럼 제출 정보 없이 보내면 예전과 똑같이 답만 돌려준다(submitted 같은 새 칸이 없다)
+    seen, _ = quiz_server
+    solver({"answer": 3, "answer_text": "서울", "reason": "r"})
+    assert hard(type="choice", choice_count=4).json() == {"choice": 2, "reason": "r"}
+    solver({"answer": "7", "reason": "r"})
+    assert easy(type="short", question="몇 개?").json() == {"text": "7", "reason": "r"}
+    assert seen == []
+
+
+def test_submitter_does_not_follow_redirects():
+    import httpx
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(307, headers={"location": "https://evil.example.com/steal"})
+
+    submitter = quiz.AnswerSubmitter()
+    submitter.http = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    status, _, problem = submitter.submit({"base": QUIZ_SERVER, "token": TEAM_TOKEN, "question_id": "q"}, {"text": "1"}, "r")
+    assert status == 307 and problem and seen == [f"{QUIZ_SERVER}/api/answer"]
+    assert quiz.AnswerSubmitter().http.follow_redirects is False
+
+
+def test_claude_system_prompt_is_cached():
+    llm, plain, _ = claude_with("claude-haiku-5-5")
+    llm.complete_vision_json("지시", "[단답]", None, 1024, {})
+    system = plain.kwargs["system"]
+    assert system[0]["cache_control"] == {"type": "ephemeral"} and system[0]["text"].startswith("지시")
+    assert plain.kwargs["messages"][0]["content"] == [{"type": "text", "text": "[단답]"}]  # 매번 다른 글은 캐시 지점 뒤

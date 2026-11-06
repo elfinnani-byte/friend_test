@@ -11,6 +11,9 @@ import re
 import threading
 import time
 from collections import defaultdict, deque
+from urllib.parse import urlsplit
+
+import httpx
 
 MAX_QUESTION = 2000
 MAX_CHOICE_TEXT = 300
@@ -176,6 +179,84 @@ def to_result(answer, count, choices=None, question=None):
             notes.append("unit_removed")
             text = number
     return {"text": text, "reason": reason}, notes  # 숫자만 요구한 게 아니면 형식 그대로("7" 과 "7개" 는 다른 답)
+
+
+# ── 퀴즈 서버에 답 바로 제출 ────────────────────────────────────────
+# quiz_server, token, question_id 셋이 함께 오면 답을 정한 뒤 서버가 {quiz_server}/api/answer 로 제출한다.
+# 셋 다 없으면 예전처럼 답만 돌려준다(첫 APK 호환). 팀 토큰은 로그, Langfuse, 응답 어디에도 남기지 않는다.
+
+SUBMIT_FIELDS = ("quiz_server", "token", "question_id")
+
+
+def server_pattern(pattern):
+    """'https://quiz-battle*.us-central1.run.app' → 호스트 정규식. * 는 점이 없는 영문·숫자·하이픈만 뜻한다."""
+    parts = urlsplit(pattern)
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError(f"QUIZ_SERVER_ALLOWLIST 항목은 https 주소여야 합니다: {pattern}")
+    return re.compile("^" + re.escape(parts.hostname.lower()).replace(r"\*", "[a-z0-9-]*") + "$")
+
+
+def allowed_server(url, allowlist):
+    """허용 목록에 맞는 https 주소면 'https://호스트' 를, 아니면 None 을 돌려준다.
+    사용자 정보, 다른 포트, 경로, 쿼리가 붙은 주소는 받지 않는다(다른 곳으로 토큰을 보내지 않게)."""
+    if not isinstance(url, str) or len(url) > 300:
+        return None
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+            or port not in (None, 443) or parts.path not in ("", "/") or parts.query or parts.fragment):
+        return None
+    host = parts.hostname.lower()
+    if any(server_pattern(p).match(host) for p in allowlist):
+        return f"https://{host}"
+    return None
+
+
+def submit_target(fields, allowlist):
+    """요청의 제출 정보를 검사한다. 셋 다 없으면 None, 일부만 있거나 주소가 허용되지 않으면 QuizError(400)."""
+    given = {k: fields.get(k) for k in SUBMIT_FIELDS if fields.get(k) not in (None, "")}
+    if not given:
+        return None
+    if len(given) < len(SUBMIT_FIELDS):
+        raise QuizError(400, "답을 바로 제출하려면 quiz_server, token, question_id 를 모두 보내 주세요.")
+    base = allowed_server(given["quiz_server"], allowlist)
+    if base is None:
+        raise QuizError(400, "허용되지 않은 퀴즈 서버 주소입니다.")
+    token, question_id = given["token"], given["question_id"]
+    if not isinstance(token, str) or len(token) > 1000 or any(c in token for c in "\r\n"):
+        raise QuizError(400, "token 형식이 올바르지 않습니다.")
+    if not isinstance(question_id, (str, int)) or len(str(question_id)) > 200:
+        raise QuizError(400, "question_id 형식이 올바르지 않습니다.")
+    return {"base": base, "token": token, "question_id": question_id}
+
+
+class AnswerSubmitter:
+    """퀴즈 서버에 답을 낸다. 같은 http 클라이언트를 계속 써서 연결을 재사용한다(TLS 연결 비용을 줄인다)."""
+
+    def __init__(self, timeout=5.0):
+        self.http = httpx.Client(timeout=timeout, follow_redirects=False,  # 리다이렉트로 토큰이 다른 곳에 가지 않게
+                                 limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60))
+
+    def submit(self, target, answer, reason):
+        """(상태 코드 또는 None, elapsed 또는 None, 오류 문구 또는 None)"""
+        body = {"question_id": target["question_id"], **answer, "reason": reason}
+        try:
+            r = self.http.post(f"{target['base']}/api/answer", json=body,
+                               headers={"Authorization": f"Bearer {target['token']}"})
+        except httpx.HTTPError as error:
+            return None, None, f"퀴즈 서버에 연결하지 못했습니다({type(error).__name__})."
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        elapsed = data.get("elapsed") if isinstance(data, dict) and isinstance(data.get("elapsed"), (int, float)) else None
+        if r.is_success:
+            return r.status_code, elapsed, None
+        detail = data.get("detail") or data.get("message") if isinstance(data, dict) else None
+        return r.status_code, elapsed, str(detail)[:200] if detail else f"퀴즈 서버가 답을 받지 않았습니다(HTTP {r.status_code})."
 
 
 # ── IP 당 분당 요청 수 ──────────────────────────────────────────────
