@@ -47,6 +47,7 @@ class Settings:
     quiz_rate_per_minute: int # IP 하나가 1분에 보낼 수 있는 퀴즈 요청 수
     quiz_image_max_side: int  # 하드모드 사진을 LLM 에 보내기 전 긴 변을 이만큼으로 줄인다. 0 이면 줄이지 않는다
     quiz_server_allowlist: list  # 답을 대신 제출해도 되는 퀴즈 서버 주소 패턴(https, * 는 점 없는 글자들)
+    quiz_server_submit: bool  # false 면 제출 정보가 와도 퀴즈 서버에 내지 않고 답만 돌려준다(앱이 직접 낸다)
 
 
 def load_dotenv(path):
@@ -124,6 +125,7 @@ def load_settings():
         quiz_model=os.environ.get("QUIZ_MODEL", "").strip() or os.environ.get("LLM_MODEL", "").strip() or defaults["model"],
         quiz_rate_per_minute=int(os.environ.get("QUIZ_RATE_PER_MINUTE", "10") or 10),
         quiz_image_max_side=int(os.environ.get("QUIZ_IMAGE_MAX_SIDE", "0") or 0),
+        quiz_server_submit=env_flag("QUIZ_SERVER_SUBMIT", True),
         quiz_server_allowlist=[p.strip() for p in (os.environ.get("QUIZ_SERVER_ALLOWLIST", "").strip()
                                                    or "https://quiz-battle*.us-central1.run.app").split(",") if p.strip()],
     )

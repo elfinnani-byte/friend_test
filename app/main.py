@@ -253,7 +253,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             if len(data) > QUIZ_MAX_PHOTO_BYTES:
                 raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
             # 제출 정보는 모델을 부르기 전에 검사한다(허용되지 않은 주소면 모델 비용 없이 400)
-            target = quiz.submit_target(form, settings.quiz_server_allowlist)
+            target = submit_target(form)
             text, image, count, trace = quiz.hard_request(form.get("type"), form.get("choice_count"), data,
                                                           photo.content_type)
             if settings.quiz_image_max_side:
@@ -268,7 +268,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             except ValueError:
                 raise quiz.QuizError(400, "JSON 또는 multipart 사진을 보내 주세요.") from None
             lap("receive")
-            target = quiz.submit_target(body if isinstance(body, dict) else {}, settings.quiz_server_allowlist)
+            target = submit_target(body if isinstance(body, dict) else {})
             text, image, count, trace = quiz.easy_request(body)
 
         def call():
@@ -291,14 +291,15 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         lap("respond")
         if target is not None:
             answer_part = {k: result[k] for k in ("choice", "text") if k in result}
-            status, elapsed, problem = await run_in_threadpool(quiz_submitter.submit, target, answer_part,
-                                                               result["reason"])
+            status, elapsed, problem, response = await run_in_threadpool(quiz_submitter.submit_with_body, target,
+                                                                         answer_part, result["reason"])
             lap("submit")
             result.update(submitted=problem is None, answer_status=status, elapsed=elapsed)
             if problem:
                 result["submit_error"] = problem
-            # 토큰은 남기지 않는다. 어느 서버(호스트)에 냈는지와 결과만 남긴다
+            # 토큰과 이유 글은 남기지 않는다. 호스트, 보낸 답(값과 타입), 퀴즈 서버 응답 본문, 결과를 남긴다
             log("INFO" if problem is None else "WARNING", "퀴즈 답 제출", host=urlsplit(target["base"]).hostname,
+                sent=quiz.answer_for_log(target["question_id"], answer_part), response=response,
                 status=status, ok=problem is None, ms=ms.get("submit"))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
@@ -306,6 +307,14 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         total_ms=sum(ms.values()), photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
         submit=target is not None)
     return result
+
+
+def submit_target(fields):
+    """제출 정보를 검사한다. QUIZ_SERVER_SUBMIT=false 면 제출 정보를 쓰지 않고 None(예전처럼 답만 돌려준다).
+    그때는 응답에 submitted 칸이 없으므로 앱이 직접 퀴즈 서버에 낸다."""
+    if not settings.quiz_server_submit:
+        return None
+    return quiz.submit_target(fields, settings.quiz_server_allowlist)
 
 
 def flush_quiz_trace():

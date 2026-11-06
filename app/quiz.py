@@ -242,21 +242,42 @@ class AnswerSubmitter:
 
     def submit(self, target, answer, reason):
         """(상태 코드 또는 None, elapsed 또는 None, 오류 문구 또는 None)"""
+        return self.submit_with_body(target, answer, reason)[:3]
+
+    def submit_with_body(self, target, answer, reason):
+        """submit 과 같고, 로그용으로 퀴즈 서버 응답 본문(줄인 것)을 네 번째로 함께 돌려준다."""
         body = {"question_id": target["question_id"], **answer, "reason": reason}
         try:
             r = self.http.post(f"{target['base']}/api/answer", json=body,
                                headers={"Authorization": f"Bearer {target['token']}"})
         except httpx.HTTPError as error:
-            return None, None, f"퀴즈 서버에 연결하지 못했습니다({type(error).__name__})."
+            return None, None, f"퀴즈 서버에 연결하지 못했습니다({type(error).__name__}).", None
         try:
             data = r.json()
         except ValueError:
             data = {}
+        response = response_for_log(data, r.text)
         elapsed = data.get("elapsed") if isinstance(data, dict) and isinstance(data.get("elapsed"), (int, float)) else None
         if r.is_success:
-            return r.status_code, elapsed, None
+            return r.status_code, elapsed, None, response
         detail = data.get("detail") or data.get("message") if isinstance(data, dict) else None
-        return r.status_code, elapsed, str(detail)[:200] if detail else f"퀴즈 서버가 답을 받지 않았습니다(HTTP {r.status_code})."
+        problem = str(detail)[:200] if detail else f"퀴즈 서버가 답을 받지 않았습니다(HTTP {r.status_code})."
+        return r.status_code, elapsed, problem, response
+
+
+def answer_for_log(question_id, answer):
+    """제출 로그에 남길 보낸 답: 값과 타입. 토큰과 이유 글은 넣지 않는다."""
+    kind = "choice" if "choice" in answer else "text"
+    value = answer[kind]
+    return {"question_id": question_id, "question_id_type": type(question_id).__name__,
+            kind: value if not isinstance(value, str) else value[:100], f"{kind}_type": type(value).__name__}
+
+
+def response_for_log(data, text):
+    """퀴즈 서버 응답 본문을 로그용으로 줄인다. JSON 이면 reason, token 같은 칸은 빼고, 아니면 앞 300자만."""
+    if isinstance(data, dict) and data:
+        return {k: v for k, v in data.items() if k.lower() not in ("reason", "token", "authorization")}
+    return (text or "")[:300]
 
 
 # ── IP 당 분당 요청 수 ──────────────────────────────────────────────
