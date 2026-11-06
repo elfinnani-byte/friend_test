@@ -14,6 +14,7 @@ import re
 import time
 
 from app import tracing
+from app.logs import log
 
 
 class OpenAICompatibleLLM:
@@ -163,7 +164,10 @@ class ClaudeLLM:
                 {"type": "base64", "media_type": image["media_type"], "data": base64.standard_b64encode(image["data"]).decode()}
             content = [{"type": "image", "source": source}, {"type": "text", "text": text}]
         system = system + "\n\n반드시 JSON 객체 하나만 출력한다. 설명이나 코드 블록 표시는 붙이지 않는다."
-        request = dict(model=self.model, max_tokens=max_tokens, system=system, output_config=self.OUTPUT_CONFIG,
+        # 매번 같은 지시문은 프롬프트 캐싱으로 다시 읽지 않게 한다. 문제 글과 사진(매번 다름)은 캐시 지점 뒤 messages 에 둔다.
+        # 지시문이 모델의 최소 캐시 길이(Claude Haiku 5.5 는 512토큰)보다 짧으면 오류 없이 캐시되지 않는다 → 로그로 확인한다
+        request = dict(model=self.model, max_tokens=max_tokens, output_config=self.OUTPUT_CONFIG,
+                       system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                        messages=[{"role": "user", "content": content}])
         if self.model in self.FALLBACK_MODELS:
             response = self.client.beta.messages.create(**request, betas=self.BETAS, fallbacks="default")
@@ -171,6 +175,11 @@ class ClaudeLLM:
             response = self.client.messages.create(**request)
         answer = self._text(response)
         self.record(None, response, trace_input, answer)
+        usage = getattr(response, "usage", None)
+        log("INFO", "퀴즈 모델 토큰", model=getattr(response, "model", None) or self.model,
+            input=getattr(usage, "input_tokens", None), output=getattr(usage, "output_tokens", None),
+            cache_read=getattr(usage, "cache_read_input_tokens", None),
+            cache_write=getattr(usage, "cache_creation_input_tokens", None))
         if response.stop_reason == "refusal":
             raise ValueError("Claude가 요청을 거절했습니다.")
         return parse_json_object(answer)

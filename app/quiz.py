@@ -6,10 +6,14 @@
 모델은 한 번만 부르고 출력은 짧게 받는다. 크레딧은 차감하지 않는다.
 """
 import difflib
+import io
 import re
 import threading
 import time
 from collections import defaultdict, deque
+from urllib.parse import urlsplit
+
+import httpx
 
 MAX_QUESTION = 2000
 MAX_CHOICE_TEXT = 300
@@ -19,10 +23,9 @@ PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 SYSTEM = "\n".join([
     "너는 퀴즈 대결에서 문제를 푸는 선수다. 문제를 읽고 정답 하나를 고른다.",
     "[객관식]",
-    "- choices_read 에 보기 글을 번호 순서대로 적힌 그대로 옮겨 쓴다(번호는 빼고 글만).",
     "- answer 에 고른 보기 번호를 숫자 하나로 쓴다. 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로).",
-    "- answer_text 에 고른 보기의 글을 choices_read 에 쓴 그대로 쓴다.",
-    '- JSON: {"choices_read": ["보기1 글", "보기2 글", ...], "answer": 번호, "answer_text": "고른 보기 글", "reason": "이유"}',
+    "- answer_text 에 고른 보기의 글을 적힌 그대로 쓴다(번호는 빼고 글만).",
+    '- JSON: {"answer": 번호, "answer_text": "고른 보기 글", "reason": "이유"}',
     "[단답]",
     "- 먼저 문제에 답 형식 지시('숫자만', '숫자로', '한 단어로', '영어로', '단위 포함' 등)가 있는지 찾는다.",
     "- 형식 지시가 있으면 answer 는 반드시 그 형식만 쓴다. '숫자만'이면 단위, 조사, 글자 없이 숫자만 쓴다(예: '7개'가 아니라 '7').",
@@ -30,7 +33,7 @@ SYSTEM = "\n".join([
     "- number_only 에 문제가 숫자만 요구하면 true, 아니면 false 를 쓴다.",
     '- JSON: {"answer": "답", "number_only": true 또는 false, "reason": "이유"}',
     "[공통]",
-    "- reason 에 답을 고른 이유를 한국어 한두 문장으로 짧게 쓴다.",
+    "- reason 에 답을 고른 이유를 한국어 한 문장으로 짧게 쓴다.",
     "- JSON 하나로만 답한다.",
 ])
 NUMBER_ONLY = re.compile(r"숫자\s*(만|로)|아라비아\s*숫자")
@@ -98,6 +101,21 @@ def hard_request(kind, choice_count, photo, media_type):
     return "\n".join(lines), {"data": photo, "media_type": media_type}, count, trace
 
 
+def shrink_photo(data, media_type, max_side):
+    """사진의 긴 변이 max_side 보다 크면 줄여 JPEG 로 다시 만든다. (바이트, 종류). 작거나 0 이면 그대로."""
+    if not max_side:
+        return data, media_type
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as img:
+        if max(img.size) <= max_side:
+            return data, media_type
+        img.thumbnail((max_side, max_side))  # 비율을 지키며 긴 변을 max_side 로
+        out = io.BytesIO()
+        img.convert("RGB").save(out, format="JPEG", quality=85)
+    return out.getvalue(), "image/jpeg"
+
+
 # ── 모델 답 해석 ────────────────────────────────────────────────────
 
 def normalize(text):
@@ -132,8 +150,9 @@ def only_number(text):
 def to_result(answer, count, choices=None, question=None):
     """모델 답을 API 응답과 고친 내용(notes)으로 바꾼다.
 
-    객관식: 모델이 말한 번호(1부터)보다 고른 보기 글을 믿는다. 이지모드는 받은 보기 목록에서,
-    하드모드는 모델이 화면에서 읽은 목록(choices_read)에서 고른 글과 가장 잘 맞는 보기를 찾는다.
+    객관식: 이지모드는 받은 보기 목록에서 고른 글(answer_text)과 가장 잘 맞는 보기를 찾아, 번호보다 글을 믿는다.
+    하드모드는 응답을 빠르게 하려고 보기 글 목록을 받지 않으므로 모델이 말한 번호를 쓴다
+    (모델이 choices_read 를 스스로 주면 그 목록으로 확인한다).
     단답: 문제가 숫자만 요구하는데 단위가 붙어 있으면 숫자만 남긴다.
     """
     reason = str(answer.get("reason", "")).strip()[:300]
@@ -160,6 +179,84 @@ def to_result(answer, count, choices=None, question=None):
             notes.append("unit_removed")
             text = number
     return {"text": text, "reason": reason}, notes  # 숫자만 요구한 게 아니면 형식 그대로("7" 과 "7개" 는 다른 답)
+
+
+# ── 퀴즈 서버에 답 바로 제출 ────────────────────────────────────────
+# quiz_server, token, question_id 셋이 함께 오면 답을 정한 뒤 서버가 {quiz_server}/api/answer 로 제출한다.
+# 셋 다 없으면 예전처럼 답만 돌려준다(첫 APK 호환). 팀 토큰은 로그, Langfuse, 응답 어디에도 남기지 않는다.
+
+SUBMIT_FIELDS = ("quiz_server", "token", "question_id")
+
+
+def server_pattern(pattern):
+    """'https://quiz-battle*.us-central1.run.app' → 호스트 정규식. * 는 점이 없는 영문·숫자·하이픈만 뜻한다."""
+    parts = urlsplit(pattern)
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError(f"QUIZ_SERVER_ALLOWLIST 항목은 https 주소여야 합니다: {pattern}")
+    return re.compile("^" + re.escape(parts.hostname.lower()).replace(r"\*", "[a-z0-9-]*") + "$")
+
+
+def allowed_server(url, allowlist):
+    """허용 목록에 맞는 https 주소면 'https://호스트' 를, 아니면 None 을 돌려준다.
+    사용자 정보, 다른 포트, 경로, 쿼리가 붙은 주소는 받지 않는다(다른 곳으로 토큰을 보내지 않게)."""
+    if not isinstance(url, str) or len(url) > 300:
+        return None
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+            or port not in (None, 443) or parts.path not in ("", "/") or parts.query or parts.fragment):
+        return None
+    host = parts.hostname.lower()
+    if any(server_pattern(p).match(host) for p in allowlist):
+        return f"https://{host}"
+    return None
+
+
+def submit_target(fields, allowlist):
+    """요청의 제출 정보를 검사한다. 셋 다 없으면 None, 일부만 있거나 주소가 허용되지 않으면 QuizError(400)."""
+    given = {k: fields.get(k) for k in SUBMIT_FIELDS if fields.get(k) not in (None, "")}
+    if not given:
+        return None
+    if len(given) < len(SUBMIT_FIELDS):
+        raise QuizError(400, "답을 바로 제출하려면 quiz_server, token, question_id 를 모두 보내 주세요.")
+    base = allowed_server(given["quiz_server"], allowlist)
+    if base is None:
+        raise QuizError(400, "허용되지 않은 퀴즈 서버 주소입니다.")
+    token, question_id = given["token"], given["question_id"]
+    if not isinstance(token, str) or len(token) > 1000 or any(c in token for c in "\r\n"):
+        raise QuizError(400, "token 형식이 올바르지 않습니다.")
+    if not isinstance(question_id, (str, int)) or len(str(question_id)) > 200:
+        raise QuizError(400, "question_id 형식이 올바르지 않습니다.")
+    return {"base": base, "token": token, "question_id": question_id}
+
+
+class AnswerSubmitter:
+    """퀴즈 서버에 답을 낸다. 같은 http 클라이언트를 계속 써서 연결을 재사용한다(TLS 연결 비용을 줄인다)."""
+
+    def __init__(self, timeout=5.0):
+        self.http = httpx.Client(timeout=timeout, follow_redirects=False,  # 리다이렉트로 토큰이 다른 곳에 가지 않게
+                                 limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=60))
+
+    def submit(self, target, answer, reason):
+        """(상태 코드 또는 None, elapsed 또는 None, 오류 문구 또는 None)"""
+        body = {"question_id": target["question_id"], **answer, "reason": reason}
+        try:
+            r = self.http.post(f"{target['base']}/api/answer", json=body,
+                               headers={"Authorization": f"Bearer {target['token']}"})
+        except httpx.HTTPError as error:
+            return None, None, f"퀴즈 서버에 연결하지 못했습니다({type(error).__name__})."
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        elapsed = data.get("elapsed") if isinstance(data, dict) and isinstance(data.get("elapsed"), (int, float)) else None
+        if r.is_success:
+            return r.status_code, elapsed, None
+        detail = data.get("detail") or data.get("message") if isinstance(data, dict) else None
+        return r.status_code, elapsed, str(detail)[:200] if detail else f"퀴즈 서버가 답을 받지 않았습니다(HTTP {r.status_code})."
 
 
 # ── IP 당 분당 요청 수 ──────────────────────────────────────────────

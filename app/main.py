@@ -14,8 +14,9 @@ import html
 import json
 import os
 import time
+from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -34,6 +35,9 @@ tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는�
 llm = make_llm(settings)
 quiz_llm = make_llm(settings, settings.quiz_model) if settings.quiz_enabled else None
 quiz_limiter = quiz.RateLimiter(settings.quiz_rate_per_minute)
+quiz_submitter = quiz.AnswerSubmitter()  # 퀴즈 서버 연결을 재사용한다(만들 때 연결하지 않는다)
+for _pattern in settings.quiz_server_allowlist:
+    quiz.server_pattern(_pattern)  # 허용 목록이 잘못 적혔으면 시작할 때 바로 알린다
 store = make_store(settings)
 current_user = Auth(settings)
 
@@ -210,54 +214,105 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
 
 
 @app.post("/api/quiz/solve")
-async def solve_quiz(request: Request, model=Depends(get_quiz_llm)):
-    """문제 하나를 푼다. JSON(이지모드) 또는 multipart 사진(하드모드). 크레딧은 차감하지 않는다."""
+async def solve_quiz(request: Request, background: BackgroundTasks, model=Depends(get_quiz_llm)):
+    """문제 하나를 푼다. JSON(이지모드) 또는 multipart 사진(하드모드). 크레딧은 차감하지 않는다.
+
+    quiz_server, token, question_id 를 함께 보내면 답을 정한 뒤 퀴즈 서버에 바로 제출하고
+    submitted, answer_status, elapsed 를 함께 돌려준다. 셋 다 없으면 예전처럼 답만 돌려준다.
+
+    Langfuse 트레이스는 응답을 보낸 뒤 보낸다(답이 0.2초쯤 빨라진다). Cloud Run 은 CPU 를 요청 중에만 주는 설정이면
+    응답 뒤 작업이 멈출 수 있으므로, 이 API 를 쓰는 동안 서비스에 --no-cpu-throttling 을 건다.
+    """
     if not settings.quiz_enabled or model is None:
         raise HTTPException(404, "Not Found")  # 꺼져 있으면 없는 주소처럼 보인다
     if not quiz_limiter.allow(quiz.client_ip(request)):
         return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
                             status_code=429)
+    # 단계별 시간(ms): receive 본문 받기, photo 사진 읽기·줄이기, llm 모델 호출, respond 답 정리
+    background.add_task(flush_quiz_trace)  # 성공이든 실패든 응답 뒤에 한 번 보낸다
+    clock = time.perf_counter()
+    ms = {}
+
+    def lap(name):
+        nonlocal clock
+        now = time.perf_counter()
+        ms[name] = round((now - clock) * 1000)
+        clock = now
+
     try:
         if request.headers.get("content-type", "").startswith("multipart/form-data"):
             # 본문을 읽기 전에 크기부터 본다(사진 5MB + 폼 여유). 읽은 뒤에도 사진 크기를 다시 확인한다
             if int(request.headers.get("content-length") or 0) > QUIZ_MAX_PHOTO_BYTES + 64 * 1024:
                 raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
             form = await request.form()
+            lap("receive")
             photo = form.get("photo")
             if photo is None or not hasattr(photo, "read"):
                 raise quiz.QuizError(400, "photo 파일이 필요합니다.")
             data = await photo.read(QUIZ_MAX_PHOTO_BYTES + 1)
             if len(data) > QUIZ_MAX_PHOTO_BYTES:
                 raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
+            # 제출 정보는 모델을 부르기 전에 검사한다(허용되지 않은 주소면 모델 비용 없이 400)
+            target = quiz.submit_target(form, settings.quiz_server_allowlist)
             text, image, count, trace = quiz.hard_request(form.get("type"), form.get("choice_count"), data,
                                                           photo.content_type)
+            if settings.quiz_image_max_side:
+                small, kind = await run_in_threadpool(quiz.shrink_photo, data, image["media_type"],
+                                                      settings.quiz_image_max_side)
+                image = {"data": small, "media_type": kind}
+                trace["sent_bytes"] = len(small)
+            lap("photo")
         else:
             try:
                 body = await request.json()
             except ValueError:
                 raise quiz.QuizError(400, "JSON 또는 multipart 사진을 보내 주세요.") from None
+            lap("receive")
+            target = quiz.submit_target(body if isinstance(body, dict) else {}, settings.quiz_server_allowlist)
             text, image, count, trace = quiz.easy_request(body)
 
         def call():
             # 모델은 한 번만 부른다. Langfuse 에는 사진 내용 대신 크기와 종류만 남긴다
+            started = time.perf_counter()
             with tracing.observe("quiz-solve", "generation", model=model.model, input=trace,
                                  metadata={"mode": trace["mode"], "type": trace["type"]}):
                 answer = model.complete_vision_json(quiz.SYSTEM, text, image, QUIZ_MAX_TOKENS, trace)
-            tracing.flush()
-            return answer
+            return answer, round((time.perf_counter() - started) * 1000)
 
         try:
-            answer = await run_in_threadpool(call)
+            answer, ms["llm"] = await run_in_threadpool(call)
+            clock = time.perf_counter()
         except quiz.QuizError:
             raise
         except Exception as error:
             log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
             raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
         result, notes = quiz.to_result(answer, count, trace.get("choices"), trace.get("question"))
+        lap("respond")
+        if target is not None:
+            answer_part = {k: result[k] for k in ("choice", "text") if k in result}
+            status, elapsed, problem = await run_in_threadpool(quiz_submitter.submit, target, answer_part,
+                                                               result["reason"])
+            lap("submit")
+            result.update(submitted=problem is None, answer_status=status, elapsed=elapsed)
+            if problem:
+                result["submit_error"] = problem
+            # 토큰은 남기지 않는다. 어느 서버(호스트)에 냈는지와 결과만 남긴다
+            log("INFO" if problem is None else "WARNING", "퀴즈 답 제출", host=urlsplit(target["base"]).hostname,
+                status=status, ok=problem is None, ms=ms.get("submit"))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
-    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], fixed=notes)
+    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], fixed=notes, ms=ms,
+        total_ms=sum(ms.values()), photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
+        submit=target is not None)
     return result
+
+
+def flush_quiz_trace():
+    """응답을 보낸 뒤 퀴즈 트레이스를 Langfuse 로 보낸다. 걸린 시간만 로그로 남긴다."""
+    started = time.perf_counter()
+    tracing.flush()
+    log("INFO", "퀴즈 트레이스 보냄", flush_ms=round((time.perf_counter() - started) * 1000))
 
 
 def own_reply(user, message_id):
