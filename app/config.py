@@ -45,6 +45,7 @@ class Settings:
     quiz_enabled: bool        # QUIZ_SOLVER_ENABLED=true 일 때만 /api/quiz/solve 가 열린다
     quiz_model: str           # 이미지를 읽는 모델. 없으면 대화 모델과 같다
     quiz_rate_per_minute: int # IP 하나가 1분에 보낼 수 있는 퀴즈 요청 수
+    quiz_image_max_side: int  # 하드모드 사진을 LLM 에 보내기 전 긴 변을 이만큼으로 줄인다. 0 이면 줄이지 않는다
 
 
 def load_dotenv(path):
@@ -121,6 +122,7 @@ def load_settings():
         quiz_enabled=os.environ.get("QUIZ_SOLVER_ENABLED", "").strip().lower() == "true",
         quiz_model=os.environ.get("QUIZ_MODEL", "").strip() or os.environ.get("LLM_MODEL", "").strip() or defaults["model"],
         quiz_rate_per_minute=int(os.environ.get("QUIZ_RATE_PER_MINUTE", "10") or 10),
+        quiz_image_max_side=int(os.environ.get("QUIZ_IMAGE_MAX_SIDE", "0") or 0),
     )
     log("INFO", "앱을 시작합니다.", provider=settings.provider, model=settings.model, env=settings.env,
         storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel,

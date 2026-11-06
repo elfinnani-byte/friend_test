@@ -351,5 +351,90 @@ def test_number_only_with_two_numbers_is_kept(solver):
 
 
 def test_prompt_asks_for_choice_texts_and_strict_format():
-    for word in ("choices_read", "answer_text", "number_only", "'숫자만'이면"):
+    for word in ("answer_text", "number_only", "'숫자만'이면", "한 문장"):
         assert word in quiz.SYSTEM
+    assert "choices_read" not in quiz.SYSTEM  # 응답을 빠르게 하려고 보기 글 목록 전체는 받지 않는다
+
+
+def test_hard_mode_without_list_uses_model_number(solver):
+    # 보기 글 목록이 없으면 하드모드는 글로 번호를 바꿀 수 없으므로 모델이 말한 번호를 쓴다
+    solver({"answer": 2, "answer_text": "[20, 40]", "reason": "r"})
+    assert hard(type="choice", choice_count=4).json()["choice"] == 1
+
+
+# ── 사진 줄이기(QUIZ_IMAGE_MAX_SIDE) ────────────────────────────────
+
+def jpeg(width, height):
+    import io as _io
+
+    from PIL import Image
+    buf = _io.BytesIO()
+    Image.new("RGB", (width, height), (200, 50, 50)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_shrink_photo_keeps_ratio_and_long_side():
+    import io as _io
+
+    from PIL import Image
+    small, kind = quiz.shrink_photo(jpeg(1080, 1920), "image/jpeg", 768)
+    assert kind == "image/jpeg" and Image.open(_io.BytesIO(small)).size == (432, 768)
+
+
+@pytest.mark.parametrize("max_side", [0, 2000])
+def test_shrink_photo_leaves_small_or_off(max_side):
+    data = jpeg(600, 400)
+    assert quiz.shrink_photo(data, "image/png", max_side) == (data, "image/png")
+
+
+def test_server_shrinks_photo_when_set(solver, monkeypatch):
+    llm = solver({"answer": "5", "number_only": True, "reason": "r"})
+    monkeypatch.setattr(main.settings, "quiz_image_max_side", 768)
+    photo = jpeg(1080, 1920)
+    assert hard(photo=photo, media_type="image/jpeg", type="short").json()["text"] == "5"
+    sent = llm.calls[0]
+    assert sent["image"]["media_type"] == "image/jpeg" and len(sent["image"]["data"]) < len(photo)
+    assert sent["trace"]["photo_bytes"] == len(photo) and sent["trace"]["sent_bytes"] == len(sent["image"]["data"])
+
+
+def test_server_does_not_shrink_by_default(solver, monkeypatch):
+    llm = solver({"answer": "5", "reason": "r"})
+    monkeypatch.setattr(main.settings, "quiz_image_max_side", 0)
+    photo = jpeg(1080, 1920)
+    hard(photo=photo, media_type="image/jpeg", type="short")
+    assert llm.calls[0]["image"]["data"] == photo
+
+
+def test_timing_is_logged(solver, capsys):
+    import json as _json
+    solver({"answer": "5", "reason": "r"})
+    hard(type="short")
+    line = next(_json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert set(line["ms"]) == {"receive", "photo", "llm", "respond"}
+    assert line["total_ms"] == sum(line["ms"].values())
+
+
+def test_trace_is_flushed_after_response(solver, monkeypatch):
+    # 응답 본문을 만든 뒤에 flush 가 불린다(TestClient 는 백그라운드 작업까지 마친 뒤 돌아온다)
+    from app import tracing
+    order = []
+    monkeypatch.setattr(tracing, "flush", lambda: order.append("flush"))
+    llm = solver({"answer": "5", "reason": "r"})
+    original = llm.complete_vision_json
+
+    def recording(*args):
+        order.append("llm")
+        return original(*args)
+
+    llm.complete_vision_json = recording
+    assert hard(type="short").status_code == 200
+    assert order == ["llm", "flush"]
+
+
+@pytest.mark.parametrize("call", [lambda: easy(type="essay", question="?"), lambda: hard(type="short")])
+def test_trace_is_flushed_once_even_on_error(solver, monkeypatch, call):
+    from app import tracing
+    flushed = []
+    monkeypatch.setattr(tracing, "flush", lambda: flushed.append(1))
+    solver({"answer": "  ", "reason": "r"})  # 단답이 비어 502
+    assert call().status_code in (400, 502) and flushed == [1]
