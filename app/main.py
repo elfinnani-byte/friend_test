@@ -253,10 +253,10 @@ async def solve_quiz(request: Request, model=Depends(get_quiz_llm)):
         except Exception as error:
             log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
             raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
-        result = quiz.to_result(answer, count)
+        result, notes = quiz.to_result(answer, count, trace.get("choices"), trace.get("question"))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
-    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"])
+    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], fixed=notes)
     return result
 
 

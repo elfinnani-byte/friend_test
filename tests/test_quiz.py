@@ -267,3 +267,89 @@ def test_langfuse_trace_is_one_generation_without_photo(solver, monkeypatch):
     assert len(spans) == 1
     attrs = str(spans[0].attributes)
     assert '"photo_bytes"' in attrs and b64.b64encode(PNG).decode() not in attrs
+
+
+# ── 객관식: 고른 보기 글을 번호보다 믿는다 ───────────────────────────
+
+SLICE = ["[20, 30, 40]", "[20, 40]", "[10, 30, 50]", "[20, 30]"]
+
+
+def test_hard_mode_number_is_fixed_by_chosen_text(solver):
+    # gpt-4o-mini 가 실제로 낸 모양: 이유와 글은 [20, 40](2번)인데 번호는 4
+    solver({"choices_read": SLICE, "answer": 4, "answer_text": "[20, 40]", "reason": "20, 40 이 출력된다."})
+    assert hard(type="choice", choice_count=4).json() == {"choice": 1, "reason": "20, 40 이 출력된다."}
+
+
+def test_text_match_ignores_spaces(solver):
+    solver({"choices_read": SLICE, "answer": 1, "answer_text": "[20,40]", "reason": "r"})
+    assert hard(type="choice", choice_count=4).json()["choice"] == 1
+
+
+def test_number_and_text_agree_is_unchanged(solver):
+    solver({"choices_read": ["부산", "인천", "서울", "대구"], "answer": 3, "answer_text": "서울", "reason": "r"})
+    assert hard(type="choice", choice_count=4).json()["choice"] == 2
+
+
+def test_easy_mode_matches_against_given_choices(solver):
+    # 이지모드는 모델이 읽은 목록이 아니라 받은 보기 목록에서 찾는다
+    solver({"answer": 1, "answer_text": "서울", "reason": "r"})
+    r = easy(type="choice", question="수도는?", choices=["부산", "서울", "대구"])
+    assert r.json()["choice"] == 1
+
+
+@pytest.mark.parametrize("answer_text, expected", [
+    (None, 3),            # 글이 없으면 번호를 쓴다
+    ("광주", 3),           # 목록에 없는 글이면 번호를 쓴다
+])
+def test_falls_back_to_number_when_text_is_unclear(solver, answer_text, expected):
+    solver({"choices_read": ["부산", "인천", "서울", "대구"], "answer": 4, "answer_text": answer_text, "reason": "r"})
+    assert hard(type="choice", choice_count=4).json()["choice"] == expected
+
+
+def test_duplicate_choice_texts_fall_back_to_number():
+    assert quiz.match_choice("A", ["A", "B", "A"]) is None
+    result, notes = quiz.to_result({"choices_read": ["A", "B", "A"], "answer": 3, "answer_text": "A"}, 3)
+    assert result["choice"] == 2 and notes == []
+
+
+def test_close_text_matches_only_when_clear():
+    assert quiz.match_choice("[20, 40 ]", SLICE) == 1
+    assert quiz.match_choice("[20, 30", SLICE) == 3        # 닫는 괄호를 빠뜨려도 가장 가까운 보기가 뚜렷하면 찾는다
+    assert quiz.match_choice("[40, 50]", SLICE) is None    # 닮은 보기가 없으면 번호를 쓴다
+    assert quiz.match_choice("[20, 30, 4", SLICE) is None  # [20, 30, 40] 과 [20, 30] 사이에서 애매하면 번호를 쓴다
+
+
+def test_fixed_number_is_noted():
+    _, notes = quiz.to_result({"choices_read": SLICE, "answer": 4, "answer_text": "[20, 40]"}, 4)
+    assert notes == ["number_from_text"]
+
+
+# ── 단답: 숫자만 요구하면 숫자만 ─────────────────────────────────────
+
+@pytest.mark.parametrize("model_answer, expected", [("5개", "5"), ("5 개", "5"), ("약 1,000원", "1000"), ("5", "5"),
+                                                     ("-3도", "-3"), ("2.5kg", "2.5")])
+def test_number_only_strips_unit(solver, model_answer, expected):
+    solver({"answer": model_answer, "number_only": True, "reason": "r"})
+    assert hard(type="short").json()["text"] == expected
+
+
+def test_number_only_from_easy_question_text(solver):
+    # 모델이 number_only 를 빠뜨려도 이지모드 문제 글에 '숫자만'이 있으면 코드가 숫자만 남긴다
+    solver({"answer": "7개", "reason": "r"})
+    assert easy(type="short", question="사과는 몇 개? (숫자만 입력)").json()["text"] == "7"
+
+
+@pytest.mark.parametrize("model_answer", ["7개", "서울"])
+def test_without_number_only_answer_is_kept(solver, model_answer):
+    solver({"answer": model_answer, "number_only": False, "reason": "r"})
+    assert easy(type="short", question="사과는 모두 몇 개인가요?").json()["text"] == model_answer
+
+
+def test_number_only_with_two_numbers_is_kept(solver):
+    solver({"answer": "3개와 4개", "number_only": True, "reason": "r"})
+    assert hard(type="short").json()["text"] == "3개와 4개"  # 어느 숫자인지 모르면 고치지 않는다
+
+
+def test_prompt_asks_for_choice_texts_and_strict_format():
+    for word in ("choices_read", "answer_text", "number_only", "'숫자만'이면"):
+        assert word in quiz.SYSTEM

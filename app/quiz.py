@@ -5,6 +5,7 @@
 모델에게는 두 모드 모두 1부터 센 번호로 답하게 하고, API 응답의 0부터 센 번호로 바꾸는 일은 코드가 한다.
 모델은 한 번만 부르고 출력은 짧게 받는다. 크레딧은 차감하지 않는다.
 """
+import difflib
 import re
 import threading
 import time
@@ -17,12 +18,22 @@ PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 SYSTEM = "\n".join([
     "너는 퀴즈 대결에서 문제를 푸는 선수다. 문제를 읽고 정답 하나를 고른다.",
-    "- 객관식: answer 에 보기 번호를 숫자 하나로 쓴다. 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로).",
-    "- 단답: answer 에 답만 쓴다. 문제가 요구한 형식을 그대로 따른다. 숫자만 요구하면 '7', 단위를 붙이라고 하면 '7개'처럼"
-    " 단위, 표기, 띄어쓰기까지 문제에 맞춘다. 형식 지시가 없으면 가장 짧은 답을 쓴다. 따옴표나 설명을 붙이지 않는다.",
+    "[객관식]",
+    "- choices_read 에 보기 글을 번호 순서대로 적힌 그대로 옮겨 쓴다(번호는 빼고 글만).",
+    "- answer 에 고른 보기 번호를 숫자 하나로 쓴다. 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로).",
+    "- answer_text 에 고른 보기의 글을 choices_read 에 쓴 그대로 쓴다.",
+    '- JSON: {"choices_read": ["보기1 글", "보기2 글", ...], "answer": 번호, "answer_text": "고른 보기 글", "reason": "이유"}',
+    "[단답]",
+    "- 먼저 문제에 답 형식 지시('숫자만', '숫자로', '한 단어로', '영어로', '단위 포함' 등)가 있는지 찾는다.",
+    "- 형식 지시가 있으면 answer 는 반드시 그 형식만 쓴다. '숫자만'이면 단위, 조사, 글자 없이 숫자만 쓴다(예: '7개'가 아니라 '7').",
+    "- 형식 지시가 없으면 문제가 묻는 말투에 맞춘 가장 짧은 답을 쓴다. 따옴표나 설명을 붙이지 않는다.",
+    "- number_only 에 문제가 숫자만 요구하면 true, 아니면 false 를 쓴다.",
+    '- JSON: {"answer": "답", "number_only": true 또는 false, "reason": "이유"}',
+    "[공통]",
     "- reason 에 답을 고른 이유를 한국어 한두 문장으로 짧게 쓴다.",
-    '- JSON 하나로만 답한다: {"answer": 번호 또는 답, "reason": "이유"}',
+    "- JSON 하나로만 답한다.",
 ])
+NUMBER_ONLY = re.compile(r"숫자\s*(만|로)|아라비아\s*숫자")
 
 
 class QuizError(Exception):
@@ -89,20 +100,66 @@ def hard_request(kind, choice_count, photo, media_type):
 
 # ── 모델 답 해석 ────────────────────────────────────────────────────
 
-def to_result(answer, count):
-    """모델 답을 API 응답으로 바꾼다. 객관식은 1부터 센 번호를 0부터로 바꾼다."""
+def normalize(text):
+    """보기 글 비교용: 공백을 지우고 소문자로."""
+    return re.sub(r"\s+", "", str(text)).lower()
+
+
+def match_choice(answer_text, choices):
+    """고른 보기 글과 가장 잘 맞는 보기의 0부터 센 번호. 확실하지 않으면 None."""
+    if not answer_text or not choices:
+        return None
+    target = normalize(answer_text)
+    exact = [i for i, c in enumerate(choices) if normalize(c) == target]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None  # 같은 글의 보기가 둘 이상이면 글로는 정할 수 없다
+    scores = sorted(((difflib.SequenceMatcher(None, target, normalize(c)).ratio(), i) for i, c in enumerate(choices)),
+                    reverse=True)
+    best, second = scores[0], scores[1] if len(scores) > 1 else (0, None)
+    if best[0] >= 0.8 and best[0] - second[0] >= 0.1:
+        return best[1]
+    return None
+
+
+def only_number(text):
+    """'5개', '약 1,000원' 처럼 숫자가 하나뿐이면 그 숫자만 남긴다. 숫자가 없거나 여럿이면 None."""
+    numbers = re.findall(r"-?\d+(?:\.\d+)?", re.sub(r"(?<=\d),(?=\d{3})", "", text))
+    return numbers[0] if len(numbers) == 1 else None
+
+
+def to_result(answer, count, choices=None, question=None):
+    """모델 답을 API 응답과 고친 내용(notes)으로 바꾼다.
+
+    객관식: 모델이 말한 번호(1부터)보다 고른 보기 글을 믿는다. 이지모드는 받은 보기 목록에서,
+    하드모드는 모델이 화면에서 읽은 목록(choices_read)에서 고른 글과 가장 잘 맞는 보기를 찾는다.
+    단답: 문제가 숫자만 요구하는데 단위가 붙어 있으면 숫자만 남긴다.
+    """
     reason = str(answer.get("reason", "")).strip()[:300]
-    value = answer.get("answer")
+    value, notes = answer.get("answer"), []
     if count:
         match = re.search(r"\d+", str(value))
         number = int(match.group(0)) if match else 0
+        read = choices if choices else answer.get("choices_read")
+        read = [str(c) for c in read][:count] if isinstance(read, list) else []
+        by_text = match_choice(answer.get("answer_text"), read)
+        if by_text is not None and by_text != number - 1:
+            notes.append("number_from_text")
+            number = by_text + 1
         if not 1 <= number <= count:
             raise QuizError(502, "모델 답에서 보기 번호를 찾지 못했습니다.")
-        return {"choice": number - 1, "reason": reason}
+        return {"choice": number - 1, "reason": reason}, notes
     text = str(value if value is not None else "").strip()
     if not text:
         raise QuizError(502, "모델이 답을 내지 않았습니다.")
-    return {"text": text, "reason": reason}  # 문제가 요구한 형식 그대로 둔다("7" 과 "7개" 는 다른 답)
+    wants_number = answer.get("number_only") is True or bool(question and NUMBER_ONLY.search(question))
+    if wants_number and not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        number = only_number(text)
+        if number is not None:
+            notes.append("unit_removed")
+            text = number
+    return {"text": text, "reason": reason}, notes  # 숫자만 요구한 게 아니면 형식 그대로("7" 과 "7개" 는 다른 답)
 
 
 # ── IP 당 분당 요청 수 ──────────────────────────────────────────────
