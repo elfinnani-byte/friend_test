@@ -558,3 +558,24 @@ def test_short_reason_is_not_marked_cut(quiz_on, capsys):
     use(llm, llm)
     assert easy(type="short", question="?").json()["reason"] == "200은 성공 코드"
     assert "reason_cut" not in solve_log(capsys)["fixed"]
+
+
+def test_quiz_eval_remote_mode_does_not_submit(tmp_path):
+    # --server 모드: 풀이 서버에 사진과 type, choice_count 만 보내고(제출 정보 없음), 429 면 기다렸다 한 번 더
+    quiz_eval = load_eval()
+    (tmp_path / "shot.png").write_bytes(PNG)
+    items = [{"id": "h1", "mode": "hard", "type": "choice", "image": "shot.png", "choice_count": 4, "answer": 2}]
+    sent, waits = [], []
+    replies = [httpx.Response(429, json={"error": "rate_limited"}),
+               httpx.Response(200, json={"choice": 2, "reason": "r", "timing": {"first_token": 900, "answer": 1500}})]
+
+    def post(url, json=None, files=None, data=None):
+        sent.append({"url": url, "json": json, "data": data, "files": sorted(files or {})})
+        return replies.pop(0)
+
+    rows = quiz_eval.run_remote(items, tmp_path, "https://eval-sonnet---svc-uc.a.run.app", post=post, sleep=waits.append)
+    assert waits == [61] and len(sent) == 2
+    assert sent[0]["url"] == "https://eval-sonnet---svc-uc.a.run.app/api/quiz/solve"
+    assert sent[0]["data"] == {"type": "choice", "choice_count": "4"} and sent[0]["files"] == ["photo"]
+    assert not any(k in json.dumps(sent, default=str) for k in ("quiz_server", "token", "question_id"))
+    assert rows[0]["ok"] is True and rows[0]["model"] == "eval-sonnet" and rows[0]["timing"]["first_token"] == 900
