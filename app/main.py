@@ -296,7 +296,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
     result["timing"] = done["timing"]  # 새 칸(예전 앱은 무시한다)
     log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], model=chosen.model, fixed=done["notes"], ms=ms,
         timing=done["timing"], photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
-        submit=target is not None, seen=done["seen"][:1000], think=done["think"][:500])
+        submit=target is not None, answer_raw=done["answer_raw"], seen=done["seen"][:1000], think=done["think"][:500])
     return result
 
 
@@ -353,7 +353,8 @@ def auto_solver(image_model, text_model):
                                question=trace.get("question"), submit=make_submit(target), started=started)
         tracing.flush()
         log("INFO", "퀴즈 풀기", mode="auto", type=trace["type"], model=chosen.model, fixed=done["notes"],
-            timing=done["timing"], submit=True, seen=done["seen"][:1000], think=done["think"][:500])
+            timing=done["timing"], submit=True, answer_raw=done["answer_raw"], seen=done["seen"][:1000],
+            think=done["think"][:500])
         return {**done["result"], **(done["submission"] or {}), "timing": done["timing"]}
 
     return solve_question

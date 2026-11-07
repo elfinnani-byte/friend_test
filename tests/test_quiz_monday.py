@@ -558,3 +558,39 @@ def test_short_reason_is_not_marked_cut(quiz_on, capsys):
     use(llm, llm)
     assert easy(type="short", question="?").json()["reason"] == "200은 성공 코드"
     assert "reason_cut" not in solve_log(capsys)["fixed"]
+
+
+# ── 객관식: 번호와 고른 보기 글을 함께 받아 맞춰 보기 ───────────────────
+
+NUMERIC = ["10", "3", "7", "2"]
+
+
+@pytest.mark.parametrize("answer, choices, number, fixed", [
+    ("2 (3)", NUMERIC, 2, None),                         # 번호와 글이 맞음
+    ("3 (3)", NUMERIC, 2, "number_from_text"),           # 번호가 틀림(보기 글 "3" 을 번호로 씀) → 글을 믿는다
+    ("3", NUMERIC, 3, None),                             # 글이 없으면 번호 그대로
+    ("2 ([20, 40])", ["[20, 30, 40]", "[20, 40]"], 2, None),
+    ("1 ([20, 40])", ["[20, 30, 40]", "[20, 40]"], 2, "number_from_text"),
+    ("2 [20, 40]", ["[20, 30, 40]", "[20, 40]"], 2, None),
+    ("②（서울）", ["부산", "서울"], 2, None),             # 동그라미 숫자, 전각 괄호
+    ("서울", ["부산", "서울"], 2, "number_from_text"),     # 번호 없이 글만
+    ("4 (광주)", ["부산", "인천", "서울", "대구"], 4, None),  # 목록에 없는 글이면 번호
+    ("3 (아무 글)", None, 3, None),                         # 하드모드: 보기 목록이 없어 번호
+    ("(모름)", None, None, None),
+])
+def test_choice_number_with_text(answer, choices, number, fixed):
+    assert quiz_flow._choice(answer, 4, choices) == (number, fixed)
+
+
+def test_numeric_choices_trust_text_end_to_end(quiz_on, capsys):
+    llm = StreamLLM(["ANSWER: 3 (3)\n", "REASON: 가장 작은 홀수\n"])
+    use(llm, llm)
+    body = easy(type="choice", question="가장 작은 홀수는?", choices=NUMERIC).json()
+    assert body["choice"] == 1  # 보기 "3" 은 두 번째(0부터 1)
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert "number_from_text" in line["fixed"] and line["answer_raw"] == "3 (3)"
+
+
+def test_prompt_asks_number_with_choice_text():
+    for system in (quiz_flow.TEXT_SYSTEM, quiz_flow.IMAGE_SYSTEM):
+        assert "'번호 (고른 보기 글)'" in system and "ANSWER: 2 (200)" in system
