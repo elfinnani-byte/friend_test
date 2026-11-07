@@ -154,10 +154,14 @@ def shrink_photo(data, media_type, max_side):
 
 # ── 모델 답 해석 ────────────────────────────────────────────────────
 
+# 지시문 예시를 따라 근거 앞에 붙는 문제 종류 머리말(예: "상식: 대한민국 수도는 서울")
+_REASON_LABEL = re.compile(r"^\s*(상식|코드|개수\s*세기|그림\s*해석|근거|REASON)\s*[:：]\s*", re.IGNORECASE)
+
+
 def clip_reason(text, limit=20):
     """퀴즈 서버에 보내는 근거: 앞뒤 공백·따옴표를 빼고 limit 자 안으로 줄인다.
     넘치면 단어 중간이 아니라 limit 자 안의 마지막 띄어쓰기 앞에서 자른다. 띄어쓰기가 없으면 limit 자에서 자른다."""
-    text = " ".join(str(text or "").strip().strip('"\'*` ').split())
+    text = " ".join(_REASON_LABEL.sub("", str(text or "").strip().strip('"\'*` ')).split())
     if len(text) <= limit:
         return text
     head = text[:limit + 1]  # limit 번째 다음 글자가 띄어쓰기면 limit 자 전체가 한 단어 단위로 끝난다

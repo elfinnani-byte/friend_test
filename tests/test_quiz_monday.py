@@ -201,6 +201,8 @@ def test_prompts_say_20_chars_with_example():
         assert "3~4단어 명사구" in system and "문장으로 끝내지 않는다" in system and "자 안팎" not in system
         for example in ("200은 성공 코드", "y가 x를 참조", "빨간 원 7개", "막대가 가장 긴 B"):
             assert example in system
+        for label in ("상식:", "코드:", "개수 세기:", "그림 해석:"):
+            assert f"{label} " not in system.split("머리말")[0]  # 예시에는 분류 이름이 없다
     assert quiz_flow.IMAGE_SYSTEM.index("SEEN:") < quiz_flow.IMAGE_SYSTEM.index("THINK:") \
         < quiz_flow.IMAGE_SYSTEM.index("ANSWER: 답") < quiz_flow.IMAGE_SYSTEM.index("REASON: 근거")
     assert "SEEN" not in quiz_flow.TEXT_SYSTEM
@@ -558,3 +560,17 @@ def test_short_reason_is_not_marked_cut(quiz_on, capsys):
     use(llm, llm)
     assert easy(type="short", question="?").json()["reason"] == "200은 성공 코드"
     assert "reason_cut" not in solve_log(capsys)["fixed"]
+
+
+
+@pytest.mark.parametrize("reason, expected", [
+    ("상식: 대한민국 수도는 서울", "대한민국 수도는 서울"),
+    ("개수 세기: 빨간 원 5개", "빨간 원 5개"),
+    ("그림 해석：막대가 가장 긴 B", "막대가 가장 긴 B"),
+    ("코드: y가 x를 참조", "y가 x를 참조"),
+    ("REASON: 200은 성공 코드", "200은 성공 코드"),
+    ("수도는 서울", "수도는 서울"),
+    ("y가 x를 참조: 같은 리스트", "y가 x를 참조: 같은 리스트"),  # 머리말이 아닌 콜론은 그대로
+])
+def test_reason_label_prefix_is_removed(reason, expected):
+    assert quiz.clip_reason(reason) == expected
