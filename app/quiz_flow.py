@@ -19,7 +19,8 @@ _COMMON = [
     "- ANSWER: 객관식이면 고른 보기 번호 숫자 하나(1부터 센다. 화면 사진이면 화면에 적힌 번호 그대로).",
     "  단답이면 답만 쓴다. 문제에 형식 지시('숫자만', '한 단어로', '단위 포함' 등)가 있으면 반드시 그 형식만 쓴다.",
     "  '숫자만'이면 단위·조사 없이 숫자만('7개'가 아니라 '7'). 지시가 없으면 가장 짧은 답. 따옴표·설명은 붙이지 않는다.",
-    "- REASON: 답을 고른 근거를 15자 안팎 한국어 한 구절로 쓴다. 예: 200은 성공 코드",
+    "- REASON: 답을 고른 근거를 3~4단어 명사구로 쓴다. 문장으로 끝내지 않는다('~다', '~요', '~때문' 로 끝내지 않음).",
+    "  예) 상식: 200은 성공 코드 / 코드: y가 x를 참조 / 개수 세기: 빨간 원 7개 / 그림 해석: 막대가 가장 긴 B",
     "- 각 항목은 줄 맨 앞에 이름과 콜론을 붙인다. 마크다운, 빈 줄, 다른 말은 쓰지 않는다.",
 ]
 TEXT_SYSTEM = "\n".join([
@@ -51,6 +52,7 @@ class QuizLines:
         self.buffer, self.current = "", None
         self.sections = {k: [] for k in KEYS}
         self.answer_done = False        # ANSWER 줄이 줄바꿈으로 끝났다
+        self.reason_cut = False         # 근거가 상한에 닿아 줄이 끝나기 전에 잘랐다
         self.reason_done = False        # REASON 이 줄바꿈으로 끝났거나 글자 수 상한에 닿았다
         self.reason_limit = reason_limit
 
@@ -80,6 +82,7 @@ class QuizLines:
         if pending is not None and len(clean(" ".join(self.sections["REASON"] + [pending]))) >= self.reason_limit:
             self._line(self.buffer)
             self.buffer = ""
+            self.reason_cut = True  # 줄이 끝나기 전에 상한에 닿았다(모델이 근거를 더 길게 쓰던 중)
 
     def finish(self):
         if self.buffer:
@@ -143,6 +146,8 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
             stream.close()
     timing.setdefault("answer", elapsed_ms(started))
     answer, reason = lines.text("ANSWER"), quiz.clip_reason(lines.text("REASON"), QUIZ_REASON_MAX)
+    if lines.reason_cut or len(lines.text("REASON")) > QUIZ_REASON_MAX:
+        notes.append("reason_cut")  # 로그 fixed 로 근거가 잘렸는지 본다
 
     if count:
         number = _choice(answer, count, choices)

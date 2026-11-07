@@ -198,8 +198,9 @@ def test_seen_and_think_go_to_log_not_quiz_server(quiz_on, quiz_server, capsys):
 
 def test_prompts_say_20_chars_with_example():
     for system in (quiz_flow.TEXT_SYSTEM, quiz_flow.IMAGE_SYSTEM):
-        assert "15자 안팎 한국어 한 구절" in system and "예: 200은 성공 코드" in system
-        assert "200은 성공 코드라 2번" not in system
+        assert "3~4단어 명사구" in system and "문장으로 끝내지 않는다" in system and "자 안팎" not in system
+        for example in ("200은 성공 코드", "y가 x를 참조", "빨간 원 7개", "막대가 가장 긴 B"):
+            assert example in system
     assert quiz_flow.IMAGE_SYSTEM.index("SEEN:") < quiz_flow.IMAGE_SYSTEM.index("THINK:") \
         < quiz_flow.IMAGE_SYSTEM.index("ANSWER: 답") < quiz_flow.IMAGE_SYSTEM.index("REASON: 근거")
     assert "SEEN" not in quiz_flow.TEXT_SYSTEM
@@ -535,3 +536,25 @@ def test_quiz_eval_example_file_is_valid():
     folder = Path(__file__).resolve().parent / "fixtures" / "quiz_eval"
     for item in json.loads((folder / "questions.example.json").read_text(encoding="utf-8")):
         quiz_eval.build(item, folder)  # 형식이 맞으면 오류 없이 풀이 입력으로 바뀐다
+
+
+
+# ── 근거가 잘렸는지 로그에 남기기 ─────────────────────────────────────
+
+def solve_log(capsys):
+    return next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+
+
+def test_reason_cut_is_logged_when_limit_reached(quiz_on, capsys):
+    llm = StreamLLM(["ANSWER: 1\nREASON: 200은 성공을 뜻하는 HTTP 상태 코드", "라서 2번\n"])
+    use(llm, llm)
+    body = easy(type="short", question="?").json()
+    assert body["reason"] == "200은 성공을 뜻하는 HTTP 상태"  # 띄어쓰기 앞에서 자른다(규칙 그대로)
+    assert "reason_cut" in solve_log(capsys)["fixed"]
+
+
+def test_short_reason_is_not_marked_cut(quiz_on, capsys):
+    llm = StreamLLM(["ANSWER: 1\n", "REASON: 200은 성공 코드\n"])
+    use(llm, llm)
+    assert easy(type="short", question="?").json()["reason"] == "200은 성공 코드"
+    assert "reason_cut" not in solve_log(capsys)["fixed"]
