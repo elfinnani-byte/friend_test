@@ -16,11 +16,13 @@ from app.config import QUIZ_MAX_TOKENS, QUIZ_MAX_TOKENS_IMAGE, QUIZ_MAX_TOKENS_T
 from app.logs import log
 
 _COMMON = [
-    "- ANSWER: 객관식이면 고른 보기 번호 숫자 하나(1부터 센다. 화면 사진이면 화면에 적힌 번호 그대로).",
+    "- ANSWER: 객관식이면 '번호 (고른 보기 글)' 모양으로 쓴다. 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로).",
+    "  보기 글은 적힌 그대로 옮긴다. 예: ANSWER: 2 (200) / ANSWER: 3 ([10, 30, 50])",
     "  단답이면 답만 쓴다. 문제에 형식 지시('숫자만', '한 단어로', '단위 포함' 등)가 있으면 반드시 그 형식만 쓴다.",
     "  '숫자만'이면 단위·조사 없이 숫자만('7개'가 아니라 '7'). 지시가 없으면 가장 짧은 답. 따옴표·설명은 붙이지 않는다.",
     "- REASON: 답을 고른 근거를 3~4단어 명사구로 쓴다. 문장으로 끝내지 않는다('~다', '~요', '~때문' 로 끝내지 않음).",
-    "  예) 상식: 200은 성공 코드 / 코드: y가 x를 참조 / 개수 세기: 빨간 원 7개 / 그림 해석: 막대가 가장 긴 B",
+    "  예: 200은 성공 코드 / y가 x를 참조 / 빨간 원 7개 / 막대가 가장 긴 B",
+    "  문제 종류 이름('상식:', '코드:' 같은 머리말)은 붙이지 않는다.",
     "- 각 항목은 줄 맨 앞에 이름과 콜론을 붙인다. 마크다운, 빈 줄, 다른 말은 쓰지 않는다.",
 ]
 TEXT_SYSTEM = "\n".join([
@@ -117,8 +119,6 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
     """
     started = started or time.perf_counter()
     timing, notes = {}, []
-    if not hasattr(model, "stream_quiz"):  # 스트리밍을 못 하는 모델(테스트용 가짜 등)은 예전 JSON 방식
-        return _solve_json(model, text, image, count, trace, choices, question, submit, started)
     system = IMAGE_SYSTEM if image is not None else TEXT_SYSTEM
     limit = QUIZ_MAX_TOKENS_IMAGE if image is not None else QUIZ_MAX_TOKENS_TEXT
     lines = QuizLines()
@@ -132,7 +132,7 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
                 lines.feed(chunk)
                 if lines.answer_done and "answer" not in timing:
                     timing["answer"] = elapsed_ms(started)
-                    if count and _choice(lines.text("ANSWER"), count, choices) is None:
+                    if count and _choice(lines.text("ANSWER"), count, choices)[0] is None:
                         break  # 번호가 없으면 근거를 기다리지 않고 바로 다시 묻는다
                 if lines.reason_done:
                     break  # 근거가 끝났다 → 더 읽지 않고 바로 제출
@@ -150,7 +150,9 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
         notes.append("reason_cut")  # 로그 fixed 로 근거가 잘렸는지 본다
 
     if count:
-        number = _choice(answer, count, choices)
+        number, fixed = _choice(answer, count, choices)
+        if fixed:
+            notes.append(fixed)
         if number is None:
             notes_part, number, reason = _retry_choice(model, text, image, count, trace, reason)
             notes += notes_part
@@ -159,18 +161,39 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
         if not answer:
             log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__ if error else "NoAnswer")
             raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.")
-        result, short_notes = quiz.to_result({"answer": answer, "reason": reason}, None, None, question)
+        # 하드모드는 문제 글이 없으므로, 모델이 SEEN 에 옮겨 적은 화면 글에서 '숫자만' 같은 형식 지시를 찾는다
+        text_answer, short_notes = quiz.short_answer(answer, question or lines.text("SEEN"))
+        result = {"text": text_answer, "reason": reason}
         notes += short_notes
-    return _finish(result, notes, timing, lines.text("SEEN"), lines.text("THINK"), submit, started)
+    done = _finish(result, notes, timing, lines.text("SEEN"), lines.text("THINK"), submit, started)
+    done["answer_raw"] = answer[:100]  # 로그용: 모델이 쓴 ANSWER 줄 그대로
+    return done
+
+
+# "2 (200)" 처럼 번호 뒤 괄호 안에 고른 보기 글. 보기 글 자체가 [..] 이어도 바깥 괄호 하나만 뗀다
+_WITH_TEXT = re.compile(r"^(.*?)\s*[(（]\s*(.+?)\s*[)）]\s*$")
 
 
 def _choice(answer, count, choices):
-    """ANSWER 값에서 보기 번호(1부터)를 읽는다. 번호가 없으면 보기 글과 맞춰 본다(이지모드)."""
-    number = quiz.choice_number(answer, count)
-    if number is None and choices:
-        found = quiz.match_choice(answer, choices)
-        number = found + 1 if found is not None else None
-    return number
+    """ANSWER 값에서 보기 번호(1부터)를 읽는다. (번호, 고친 내용 또는 None)
+
+    "번호 (보기 글)" 이면 번호와 보기 글을 맞춰 보고, 이지모드(보기 목록이 있음)에서 둘이 다르면 보기 글을 믿는다.
+    보기가 숫자인 문제(["10", "3", "7", "2"])에서 모델이 번호 대신 보기 글을 써도 바로잡기 위해서다.
+    하드모드는 보기 목록이 없어 번호를 쓴다(보기 글은 로그에만 남는다).
+    """
+    match = _WITH_TEXT.match(answer or "")
+    number_part, text_part = (match.group(1), match.group(2)) if match else (answer, None)
+    by_text = quiz.match_choice(text_part, choices) if text_part and choices else None
+    if number_part.strip():
+        number = quiz.choice_number(number_part, count)
+    else:  # "(4)" 처럼 괄호 안에 번호만 쓴 경우
+        number = quiz.choice_number(text_part, count) if by_text is None else None
+    if by_text is not None and by_text + 1 != number:
+        return by_text + 1, "number_from_text"
+    if number is None and choices and not match:
+        found = quiz.match_choice(answer, choices)  # 번호 없이 보기 글만 쓴 경우
+        return (found + 1, "number_from_text") if found is not None else (None, None)
+    return number, None
 
 
 def _retry_choice(model, text, image, count, trace, reason):
@@ -200,24 +223,3 @@ def _finish(result, notes, timing, seen, think, submit, started):
         timing["submitted"] = timing["reason_sent"] = elapsed_ms(started)  # 근거도 같은 요청으로 보냈다
     timing["total"] = elapsed_ms(started)
     return {"result": result, "notes": notes, "timing": timing, "seen": seen, "think": think, "submission": submission}
-
-
-def _solve_json(model, text, image, count, trace, choices, question, submit, started):
-    """예전 방식: JSON 한 번에 받기(스트리밍을 못 하는 모델용)."""
-    timing = {}
-    try:
-        with tracing.observe("quiz-solve", "generation", model=model.model, input=trace,
-                             metadata={"mode": trace["mode"], "type": trace["type"]}):
-            answer = model.complete_vision_json(quiz.SYSTEM, text, image, QUIZ_MAX_TOKENS, trace)
-        timing["answer"] = elapsed_ms(started)
-        result, notes = quiz.to_result(answer, count, choices, question)
-    except quiz.QuizError:
-        raise
-    except Exception as error:
-        timing.setdefault("answer", elapsed_ms(started))
-        if not count:
-            log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
-            raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
-        notes, number, reason = _retry_choice(model, text, image, count, trace, getattr(error, "reason", ""))
-        result = {"choice": number - 1, "reason": reason}
-    return _finish(result, notes, timing, "", "", submit, started)

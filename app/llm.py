@@ -83,16 +83,9 @@ class OpenAICompatibleLLM:
 
     def complete_vision_json(self, system, text, image, max_tokens, trace_input):
         """이미지 한 장(image: {"url"} 또는 {"data", "media_type"})과 질문으로 JSON 하나를 받는다."""
-        content = [{"type": "text", "text": text}]
-        if image is not None:
-            url = image["url"] if "url" in image else \
-                f"data:{image['media_type']};base64,{base64.b64encode(image['data']).decode()}"
-            content.append({"type": "image_url", "image_url": {"url": url}})
-        # OpenAI 주소는 max_completion_tokens, 호환 주소(Gemini)는 max_tokens 로 출력 상한을 준다
-        limit = {"max_completion_tokens": max_tokens} if self.stream_usage else {"max_tokens": max_tokens}
         response = self.client.chat.completions.create(
-            model=self.model, response_format={"type": "json_object"}, **limit,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": content}])
+            model=self.model, response_format={"type": "json_object"}, **self._limit(max_tokens),
+            messages=self._vision_messages(system, text, image))
         answer = response.choices[0].message.content
         self.record(None, response.model, trace_input, answer, response.usage)
         return json.loads(answer)
