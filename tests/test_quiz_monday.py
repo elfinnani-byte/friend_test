@@ -116,11 +116,18 @@ def test_reason_without_newline_is_cut_at_20_and_submitted(quiz_on, quiz_server)
 
 @pytest.mark.parametrize("reason, expected", [
     ("짧은 근거", "짧은 근거"),
-    ("이 근거는 스무 글자를 훨씬 넘어가는 아주 긴 근거입니다", "이 근거는 스무 글자를 훨씬 넘어가는 "[:20].strip()),
     ('"따옴표 근거"', "따옴표 근거"),
+    ("200은 성공 코드", "200은 성공 코드"),
+    ("정확히 스무 글자로 맞춘 근거입니다요", "정확히 스무 글자로 맞춘 근거입니다요"),        # 20자는 그대로
+    ("200은 요청 성공을 뜻하는 상태 코드라서", "200은 요청 성공을 뜻하는 상태"),          # 단어 중간(코|드)이 아니라 띄어쓰기 앞
+    ("200은 성공 응답을 뜻하는 상태 코드", "200은 성공 응답을 뜻하는 상태"),
+    ("가나다라마 바사아자차 카타파하거너더러 버서", "가나다라마 바사아자차 카타파하거너더러"),  # 20자째에서 단어가 끝나면 20자 그대로
+    ("띄어쓰기가전혀없는아주긴근거는스무글자에서자른다", "띄어쓰기가전혀없는아주긴근거는스무글자에"),  # 띄어쓰기가 없으면 20자
+    ("줄\n바꿈이   여러 칸", "줄 바꿈이 여러 칸"),
 ])
-def test_reason_is_clipped_to_20(reason, expected):
-    assert quiz.clip_reason(reason) == expected and len(quiz.clip_reason(reason)) <= 20
+def test_reason_is_clipped_at_word_boundary(reason, expected):
+    clipped = quiz.clip_reason(reason)
+    assert clipped == expected and len(clipped) <= 20
 
 
 def test_old_app_without_submit_gets_old_fields_plus_timing(quiz_on, quiz_server):
@@ -191,7 +198,8 @@ def test_seen_and_think_go_to_log_not_quiz_server(quiz_on, quiz_server, capsys):
 
 def test_prompts_say_20_chars_with_example():
     for system in (quiz_flow.TEXT_SYSTEM, quiz_flow.IMAGE_SYSTEM):
-        assert "20자 이내 한국어 한 구절" in system and "200은 성공 코드라 2번" in system
+        assert "15자 안팎 한국어 한 구절" in system and "예: 200은 성공 코드" in system
+        assert "200은 성공 코드라 2번" not in system
     assert quiz_flow.IMAGE_SYSTEM.index("SEEN:") < quiz_flow.IMAGE_SYSTEM.index("THINK:") \
         < quiz_flow.IMAGE_SYSTEM.index("ANSWER: 답") < quiz_flow.IMAGE_SYSTEM.index("REASON: 근거")
     assert "SEEN" not in quiz_flow.TEXT_SYSTEM
