@@ -17,6 +17,7 @@ from app import quiz
 from app.logs import log
 
 MAX_RECENT = 10
+MAX_ATTEMPTS = 2   # 한 문제를 풀어 내는 시도 횟수(실패하면 문제가 열려 있는 동안 한 번 더)
 
 
 def token_key(token):
@@ -36,6 +37,7 @@ class AutoRun:
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.handled = set()              # 풀었거나 건너뛴 문제 id
+        self.attempts = {}                # 문제 id → 푼 횟수(실패하면 다시 풀기 위해)
         self.recent = deque(maxlen=MAX_RECENT)
         self.state, self.index, self.total, self.current = None, None, None, None
         self.stop_reason = None
@@ -102,25 +104,46 @@ class AutoRun:
         qid = question.get("id")
         if self.state != "open" or not qid or qid in self.handled:
             return
-        self.handled.add(qid)
         if data.get("my_answer") is not None:
+            # 이미 낸 문제(앱이 냈거나, 앞 시도의 제출이 실제로는 들어갔음)는 다시 내지 않는다
+            self.handled.add(qid)
             self._record({"question_id": qid, "index": self.index, "skipped": "already_answered"})
             return
         if question.get("hidden") or question.get("hard") or not question.get("text"):
             # 하드모드: 문제 글이 없으므로 앱이 사진으로 푼다
+            self.handled.add(qid)
             self._record({"question_id": qid, "index": self.index, "skipped": "hidden"})
             return
+        attempt = self.attempts.get(qid, 0) + 1
+        self.attempts[qid] = attempt
         with self.lock:
             self.current = qid
         try:
             item = self.solve_question(self.base, self.token, question)
         except Exception as error:
             item = {"error": type(error).__name__}
-            log("WARNING", "퀴즈 직접 풀기 실패", error=type(error).__name__)
+            log("WARNING", "퀴즈 직접 풀기 실패", error=type(error).__name__, attempt=attempt)
         finally:
             with self.lock:
                 self.current = None
-        self._record({"question_id": qid, "index": self.index, **item})
+        if failed(item) and attempt < MAX_ATTEMPTS:
+            # 풀기나 제출이 실패했으면 handled 에 넣지 않는다 → 다음 확인 때 문제가 아직 열려 있고
+            # my_answer 가 없으면 한 번 더 푼다(답을 안 내면 0점)
+            self._record({"question_id": qid, "index": self.index, "attempt": attempt, "retry": True, **item})
+            return
+        self.handled.add(qid)
+        self._record({"question_id": qid, "index": self.index, "attempt": attempt, **item})
+
+
+def failed(item):
+    """다시 풀 만한 실패인지: 풀기에서 오류가 났거나, 퀴즈 서버에 닿지 못했거나 서버 오류(5xx)로 제출하지 못했다.
+    409(이미 냈거나 받는 시간이 아님)나 다른 4xx 는 다시 내도 소용이 없으므로 다시 풀지 않는다."""
+    if "error" in item:
+        return True
+    if item.get("submitted") is False:
+        status = item.get("answer_status")
+        return status is None or status >= 500
+    return False
 
 
 class AutoManager:
