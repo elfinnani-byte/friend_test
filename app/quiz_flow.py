@@ -107,6 +107,13 @@ def pick_models(image, image_model, text_model):
     return image_model if image is not None or text_model is None else text_model
 
 
+def app_timings(timing):
+    """앱(mini-games)이 읽는 이름의 시간 칸(ms 정수). 앱은 timings 의 first_token_ms, submit_ms, reason_ms 를 찾는다.
+    근거는 답과 같은 요청으로 내므로 reason_ms 는 submit_ms 와 같다. 값이 없는 칸(제출 안 함 등)은 넣지 않는다."""
+    names = {"first_token_ms": "first_token", "submit_ms": "submitted", "reason_ms": "reason_sent"}
+    return {app: int(timing[ours]) for app, ours in names.items() if isinstance(timing.get(ours), (int, float))}
+
+
 def elapsed_ms(started):
     return round((time.perf_counter() - started) * 1000)
 
