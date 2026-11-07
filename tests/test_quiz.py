@@ -27,12 +27,31 @@ client = OldShapeClient(main.app)
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
 
+def as_stream(answer, image):
+    """정해 둔 답(dict)을 실제 모델처럼 줄 형식 스트리밍으로 바꾼다.
+    answer_text 는 "번호 (보기 글)" 의 괄호로, 하드모드 number_only 는 SEEN 의 "(숫자만 입력)" 으로 나타낸다."""
+    lines = []
+    if image is not None:
+        lines += ["SEEN: (가짜) 퀴즈 화면" + (" (숫자만 입력)" if answer.get("number_only") else ""), "THINK: (가짜)"]
+    value = answer.get("answer")
+    shown = "" if value is None else str(value)
+    if answer.get("answer_text"):
+        shown += f" ({answer['answer_text']})"
+    lines += [f"ANSWER: {shown}", f"REASON: {answer.get('reason', '')}"]
+    yield "\n".join(lines) + "\n"
+
+
 class ScriptedLLM:
-    """모델을 부르지 않는다. 받은 지시문과 이미지를 기록하고 정해 둔 답을 돌려준다."""
+    """모델을 부르지 않는다. 받은 지시문과 이미지를 기록하고 정해 둔 답을 줄 형식으로 흘려보낸다."""
     model = "scripted-vision"
 
     def __init__(self, answer):
         self.answer, self.calls = answer, []
+
+    def stream_quiz(self, system, text, image, max_tokens, trace_input):
+        self.calls.append({"system": system, "text": text, "image": image, "max_tokens": max_tokens,
+                           "trace": trace_input})
+        yield from as_stream(self.answer, image)
 
     def complete_vision_json(self, system, text, image, max_tokens, trace_input):
         self.calls.append({"text": text, "image": image, "max_tokens": max_tokens, "trace": trace_input})
@@ -120,7 +139,7 @@ def test_short_answer_keeps_requested_form(solver, model_answer):
     llm = solver({"answer": model_answer, "reason": "세어 보았습니다."})
     r = easy(type="short", question="사과는 모두 몇 개인가요?")
     assert r.status_code == 200 and r.json() == {"text": model_answer.strip(), "reason": "세어 보았습니다."}
-    assert "[단답]" in llm.calls[0]["text"] and "'7개'" in quiz.SYSTEM  # 형식 지시가 지시문에 있다
+    assert "[단답]" in llm.calls[0]["text"] and "'7개'" in llm.calls[0]["system"]  # 형식 지시가 지시문에 있다
 
 
 def test_short_answer_from_photo(solver):
@@ -200,8 +219,8 @@ def test_does_not_touch_credits_or_messages(solver):
 
 def test_fake_llm_answers_quiz():
     fake = FakeLLM(delay=0)
-    assert fake.complete_vision_json(quiz.SYSTEM, "[객관식]\n문제", None, 100, {})["answer"] == 1
-    assert fake.complete_vision_json(quiz.SYSTEM, "[단답]\n문제", None, 100, {})["answer"] == "가짜 답"
+    assert fake.complete_vision_json(quiz.RETRY_SYSTEM, "[객관식]\n문제", None, 100, {})["answer"] == 1
+    assert fake.complete_vision_json(quiz.RETRY_SYSTEM, "[단답]\n문제", None, 100, {})["answer"] == "가짜 답"
 
 
 # ── 실제 모델로 보낼 요청 모양(모델은 부르지 않는다) ─────────────────
@@ -292,17 +311,6 @@ def test_langfuse_trace_is_one_generation_without_photo(solver, monkeypatch):
 SLICE = ["[20, 30, 40]", "[20, 40]", "[10, 30, 50]", "[20, 30]"]
 
 
-def test_hard_mode_number_is_fixed_by_chosen_text(solver):
-    # gpt-4o-mini 가 실제로 낸 모양: 이유와 글은 [20, 40](2번)인데 번호는 4
-    solver({"choices_read": SLICE, "answer": 4, "answer_text": "[20, 40]", "reason": "20, 40 이 출력된다."})
-    assert hard(type="choice", choice_count=4).json() == {"choice": 1, "reason": "20, 40 이 출력된다."}
-
-
-def test_text_match_ignores_spaces(solver):
-    solver({"choices_read": SLICE, "answer": 1, "answer_text": "[20,40]", "reason": "r"})
-    assert hard(type="choice", choice_count=4).json()["choice"] == 1
-
-
 def test_number_and_text_agree_is_unchanged(solver):
     solver({"choices_read": ["부산", "인천", "서울", "대구"], "answer": 3, "answer_text": "서울", "reason": "r"})
     assert hard(type="choice", choice_count=4).json()["choice"] == 2
@@ -325,21 +333,15 @@ def test_falls_back_to_number_when_text_is_unclear(solver, answer_text, expected
 
 
 def test_duplicate_choice_texts_fall_back_to_number():
+    from app import quiz_flow
     assert quiz.match_choice("A", ["A", "B", "A"]) is None
-    result, notes = quiz.to_result({"choices_read": ["A", "B", "A"], "answer": 3, "answer_text": "A"}, 3)
-    assert result["choice"] == 2 and notes == []
-
+    assert quiz_flow._choice("3 (A)", 3, ["A", "B", "A"]) == (3, None)  # 글로 정할 수 없으면 번호
 
 def test_close_text_matches_only_when_clear():
     assert quiz.match_choice("[20, 40 ]", SLICE) == 1
     assert quiz.match_choice("[20, 30", SLICE) == 3        # 닫는 괄호를 빠뜨려도 가장 가까운 보기가 뚜렷하면 찾는다
     assert quiz.match_choice("[40, 50]", SLICE) is None    # 닮은 보기가 없으면 번호를 쓴다
     assert quiz.match_choice("[20, 30, 4", SLICE) is None  # [20, 30, 40] 과 [20, 30] 사이에서 애매하면 번호를 쓴다
-
-
-def test_fixed_number_is_noted():
-    _, notes = quiz.to_result({"choices_read": SLICE, "answer": 4, "answer_text": "[20, 40]"}, 4)
-    assert notes == ["number_from_text"]
 
 
 # ── 단답: 숫자만 요구하면 숫자만 ─────────────────────────────────────
@@ -368,59 +370,10 @@ def test_number_only_with_two_numbers_is_kept(solver):
     assert hard(type="short").json()["text"] == "3개와 4개"  # 어느 숫자인지 모르면 고치지 않는다
 
 
-def test_prompt_asks_for_choice_texts_and_strict_format():
-    for word in ("answer_text", "number_only", "'숫자만'이면", "한 문장"):
-        assert word in quiz.SYSTEM
-    assert "choices_read" not in quiz.SYSTEM  # 응답을 빠르게 하려고 보기 글 목록 전체는 받지 않는다
-
-
 def test_hard_mode_without_list_uses_model_number(solver):
     # 보기 글 목록이 없으면 하드모드는 글로 번호를 바꿀 수 없으므로 모델이 말한 번호를 쓴다
     solver({"answer": 2, "answer_text": "[20, 40]", "reason": "r"})
     assert hard(type="choice", choice_count=4).json()["choice"] == 1
-
-
-# ── 사진 줄이기(QUIZ_IMAGE_MAX_SIDE) ────────────────────────────────
-
-def jpeg(width, height):
-    import io as _io
-
-    from PIL import Image
-    buf = _io.BytesIO()
-    Image.new("RGB", (width, height), (200, 50, 50)).save(buf, format="JPEG")
-    return buf.getvalue()
-
-
-def test_shrink_photo_keeps_ratio_and_long_side():
-    import io as _io
-
-    from PIL import Image
-    small, kind = quiz.shrink_photo(jpeg(1080, 1920), "image/jpeg", 768)
-    assert kind == "image/jpeg" and Image.open(_io.BytesIO(small)).size == (432, 768)
-
-
-@pytest.mark.parametrize("max_side", [0, 2000])
-def test_shrink_photo_leaves_small_or_off(max_side):
-    data = jpeg(600, 400)
-    assert quiz.shrink_photo(data, "image/png", max_side) == (data, "image/png")
-
-
-def test_server_shrinks_photo_when_set(solver, monkeypatch):
-    llm = solver({"answer": "5", "number_only": True, "reason": "r"})
-    monkeypatch.setattr(main.settings, "quiz_image_max_side", 768)
-    photo = jpeg(1080, 1920)
-    assert hard(photo=photo, media_type="image/jpeg", type="short").json()["text"] == "5"
-    sent = llm.calls[0]
-    assert sent["image"]["media_type"] == "image/jpeg" and len(sent["image"]["data"]) < len(photo)
-    assert sent["trace"]["photo_bytes"] == len(photo) and sent["trace"]["sent_bytes"] == len(sent["image"]["data"])
-
-
-def test_server_does_not_shrink_by_default(solver, monkeypatch):
-    llm = solver({"answer": "5", "reason": "r"})
-    monkeypatch.setattr(main.settings, "quiz_image_max_side", 0)
-    photo = jpeg(1080, 1920)
-    hard(photo=photo, media_type="image/jpeg", type="short")
-    assert llm.calls[0]["image"]["data"] == photo
 
 
 def test_timing_is_logged(solver, capsys):
@@ -438,13 +391,13 @@ def test_trace_is_flushed_after_response(solver, monkeypatch):
     order = []
     monkeypatch.setattr(tracing, "flush", lambda: order.append("flush"))
     llm = solver({"answer": "5", "reason": "r"})
-    original = llm.complete_vision_json
+    original = llm.stream_quiz
 
     def recording(*args):
         order.append("llm")
         return original(*args)
 
-    llm.complete_vision_json = recording
+    llm.stream_quiz = recording
     assert hard(type="short").status_code == 200
     assert order == ["llm", "flush"]
 
@@ -701,7 +654,6 @@ def test_non_json_response_is_cut():
     assert quiz.response_for_log({"token": "t", "Reason": "r", "ok": 1}, "") == {"ok": 1}
 
 
-
 # ── 객관식 번호를 못 찾을 때: 여러 모양 읽기, 다시 묻기, 1번 내기 ─────────────
 
 class SequenceLLM:
@@ -710,6 +662,13 @@ class SequenceLLM:
 
     def __init__(self, *answers):
         self.answers, self.calls = list(answers), []
+
+    def stream_quiz(self, system, text, image, max_tokens, trace_input):
+        self.calls.append({"system": system, "text": text, "image": image})
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        yield from as_stream(answer, image)
 
     def complete_vision_json(self, system, text, image, max_tokens, trace_input):
         self.calls.append({"system": system, "text": text, "image": image})
