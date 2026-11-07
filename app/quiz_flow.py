@@ -118,8 +118,6 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
     """
     started = started or time.perf_counter()
     timing, notes = {}, []
-    if not hasattr(model, "stream_quiz"):  # 스트리밍을 못 하는 모델(테스트용 가짜 등)은 예전 JSON 방식
-        return _solve_json(model, text, image, count, trace, choices, question, submit, started)
     system = IMAGE_SYSTEM if image is not None else TEXT_SYSTEM
     limit = QUIZ_MAX_TOKENS_IMAGE if image is not None else QUIZ_MAX_TOKENS_TEXT
     lines = QuizLines()
@@ -162,7 +160,9 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
         if not answer:
             log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__ if error else "NoAnswer")
             raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.")
-        result, short_notes = quiz.to_result({"answer": answer, "reason": reason}, None, None, question)
+        # 하드모드는 문제 글이 없으므로, 모델이 SEEN 에 옮겨 적은 화면 글에서 '숫자만' 같은 형식 지시를 찾는다
+        text_answer, short_notes = quiz.short_answer(answer, question or lines.text("SEEN"))
+        result = {"text": text_answer, "reason": reason}
         notes += short_notes
     done = _finish(result, notes, timing, lines.text("SEEN"), lines.text("THINK"), submit, started)
     done["answer_raw"] = answer[:100]  # 로그용: 모델이 쓴 ANSWER 줄 그대로
@@ -182,8 +182,11 @@ def _choice(answer, count, choices):
     """
     match = _WITH_TEXT.match(answer or "")
     number_part, text_part = (match.group(1), match.group(2)) if match else (answer, None)
-    number = quiz.choice_number(number_part, count) if number_part.strip() else None
     by_text = quiz.match_choice(text_part, choices) if text_part and choices else None
+    if number_part.strip():
+        number = quiz.choice_number(number_part, count)
+    else:  # "(4)" 처럼 괄호 안에 번호만 쓴 경우
+        number = quiz.choice_number(text_part, count) if by_text is None else None
     if by_text is not None and by_text + 1 != number:
         return by_text + 1, "number_from_text"
     if number is None and choices and not match:
@@ -219,26 +222,3 @@ def _finish(result, notes, timing, seen, think, submit, started):
         timing["submitted"] = timing["reason_sent"] = elapsed_ms(started)  # 근거도 같은 요청으로 보냈다
     timing["total"] = elapsed_ms(started)
     return {"result": result, "notes": notes, "timing": timing, "seen": seen, "think": think, "submission": submission}
-
-
-def _solve_json(model, text, image, count, trace, choices, question, submit, started):
-    """예전 방식: JSON 한 번에 받기(스트리밍을 못 하는 모델용)."""
-    timing = {}
-    try:
-        with tracing.observe("quiz-solve", "generation", model=model.model, input=trace,
-                             metadata={"mode": trace["mode"], "type": trace["type"]}):
-            answer = model.complete_vision_json(quiz.SYSTEM, text, image, QUIZ_MAX_TOKENS, trace)
-        timing["answer"] = elapsed_ms(started)
-        result, notes = quiz.to_result(answer, count, choices, question)
-    except quiz.QuizError:
-        raise
-    except Exception as error:
-        timing.setdefault("answer", elapsed_ms(started))
-        if not count:
-            log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
-            raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
-        notes, number, reason = _retry_choice(model, text, image, count, trace, getattr(error, "reason", ""))
-        result = {"choice": number - 1, "reason": reason}
-    done = _finish(result, notes, timing, "", "", submit, started)
-    done["answer_raw"] = ""
-    return done

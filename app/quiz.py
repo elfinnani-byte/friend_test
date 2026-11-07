@@ -6,7 +6,6 @@
 모델은 한 번만 부르고 출력은 짧게 받는다. 크레딧은 차감하지 않는다.
 """
 import difflib
-import io
 import re
 import unicodedata
 import threading
@@ -21,22 +20,6 @@ MAX_CHOICE_TEXT = 300
 MIN_CHOICES, MAX_CHOICES = 2, 10
 PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
-SYSTEM = "\n".join([
-    "너는 퀴즈 대결에서 문제를 푸는 선수다. 문제를 읽고 정답 하나를 고른다.",
-    "[객관식]",
-    "- answer 에 고른 보기 번호를 숫자 하나로 쓴다. 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로).",
-    "- answer_text 에 고른 보기의 글을 적힌 그대로 쓴다(번호는 빼고 글만).",
-    '- JSON: {"answer": 번호, "answer_text": "고른 보기 글", "reason": "이유"}',
-    "[단답]",
-    "- 먼저 문제에 답 형식 지시('숫자만', '숫자로', '한 단어로', '영어로', '단위 포함' 등)가 있는지 찾는다.",
-    "- 형식 지시가 있으면 answer 는 반드시 그 형식만 쓴다. '숫자만'이면 단위, 조사, 글자 없이 숫자만 쓴다(예: '7개'가 아니라 '7').",
-    "- 형식 지시가 없으면 문제가 묻는 말투에 맞춘 가장 짧은 답을 쓴다. 따옴표나 설명을 붙이지 않는다.",
-    "- number_only 에 문제가 숫자만 요구하면 true, 아니면 false 를 쓴다.",
-    '- JSON: {"answer": "답", "number_only": true 또는 false, "reason": "이유"}',
-    "[공통]",
-    "- reason 에 답을 고른 이유를 한국어 한 문장으로 짧게 쓴다.",
-    "- JSON 하나로만 답한다.",
-])
 # 객관식에서 첫 답에 보기 번호가 없을 때 한 번 더 짧게 묻는 지시문
 RETRY_SYSTEM = "\n".join([
     "너는 퀴즈 대결에서 객관식 문제를 푸는 선수다. 정답 보기 번호 하나만 고른다.",
@@ -45,14 +28,6 @@ RETRY_SYSTEM = "\n".join([
 ])
 FALLBACK_REASON = "번호를 못 읽어 1번을 냄"   # 20자 이내
 RETRY_REASON = "번호만 다시 물어 고름"
-
-
-class NoChoice(Exception):
-    """모델 답에서 보기 번호를 찾지 못했다. 한 번 더 묻거나 1번을 낸다(답을 안 내면 0점이므로 502 를 내지 않는다)."""
-
-    def __init__(self, reason=""):
-        super().__init__("no choice")
-        self.reason = reason
 
 
 # NFKC 가 바꾸지 않는 동그라미 숫자(❶~❿, ➀~➉, ➊~➓)
@@ -137,23 +112,6 @@ def hard_request(kind, choice_count, photo, media_type):
     return "\n".join(lines), {"data": photo, "media_type": media_type}, count, trace
 
 
-def shrink_photo(data, media_type, max_side):
-    """사진의 긴 변이 max_side 보다 크면 줄여 JPEG 로 다시 만든다. (바이트, 종류). 작거나 0 이면 그대로."""
-    if not max_side:
-        return data, media_type
-    from PIL import Image
-
-    with Image.open(io.BytesIO(data)) as img:
-        if max(img.size) <= max_side:
-            return data, media_type
-        img.thumbnail((max_side, max_side))  # 비율을 지키며 긴 변을 max_side 로
-        out = io.BytesIO()
-        img.convert("RGB").save(out, format="JPEG", quality=85)
-    return out.getvalue(), "image/jpeg"
-
-
-# ── 모델 답 해석 ────────────────────────────────────────────────────
-
 def clip_reason(text, limit=20):
     """퀴즈 서버에 보내는 근거: 앞뒤 공백·따옴표를 빼고 limit 자 안으로 줄인다.
     넘치면 단어 중간이 아니라 limit 자 안의 마지막 띄어쓰기 앞에서 자른다. 띄어쓰기가 없으면 limit 자에서 자른다."""
@@ -194,37 +152,16 @@ def only_number(text):
     return numbers[0] if len(numbers) == 1 else None
 
 
-def to_result(answer, count, choices=None, question=None):
-    """모델 답을 API 응답과 고친 내용(notes)으로 바꾼다.
-
-    객관식: 이지모드는 받은 보기 목록에서 고른 글(answer_text)과 가장 잘 맞는 보기를 찾아, 번호보다 글을 믿는다.
-    하드모드는 응답을 빠르게 하려고 보기 글 목록을 받지 않으므로 모델이 말한 번호를 쓴다
-    (모델이 choices_read 를 스스로 주면 그 목록으로 확인한다).
-    단답: 문제가 숫자만 요구하는데 단위가 붙어 있으면 숫자만 남긴다.
-    """
-    reason = clip_reason(answer.get("reason", ""))
-    value, notes = answer.get("answer"), []
-    if count:
-        number = choice_number(value, count) or 0
-        read = choices if choices else answer.get("choices_read")
-        read = [str(c) for c in read][:count] if isinstance(read, list) else []
-        by_text = match_choice(answer.get("answer_text"), read)
-        if by_text is not None and by_text != number - 1:
-            notes.append("number_from_text")
-            number = by_text + 1
-        if not 1 <= number <= count:
-            raise NoChoice(reason)
-        return {"choice": number - 1, "reason": reason}, notes
-    text = str(value if value is not None else "").strip()
-    if not text:
-        raise QuizError(502, "모델이 답을 내지 않았습니다.")
-    wants_number = answer.get("number_only") is True or bool(question and NUMBER_ONLY.search(question))
-    if wants_number and not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+def short_answer(text, question=None):
+    """단답을 정리한다. (답, 고친 내용). 문제(또는 하드모드 화면 글)가 숫자만 요구하는데 단위가 붙어 있으면 숫자만 남긴다.
+    숫자만 요구한 게 아니면 형식 그대로 둔다("7" 과 "7개" 는 다른 답)."""
+    text, notes = str(text or "").strip(), []
+    if question and NUMBER_ONLY.search(question) and not re.fullmatch(r"-?\d+(?:\.\d+)?", text):
         number = only_number(text)
         if number is not None:
             notes.append("unit_removed")
             text = number
-    return {"text": text, "reason": reason}, notes  # 숫자만 요구한 게 아니면 형식 그대로("7" 과 "7개" 는 다른 답)
+    return text, notes
 
 
 # ── 퀴즈 서버에 답 바로 제출 ────────────────────────────────────────

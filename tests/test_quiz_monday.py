@@ -649,3 +649,13 @@ def test_auto_does_not_retry_when_answer_already_recorded():
     solved, results = run_auto([question(qid="t1"), question(qid="t1", my_answer={"choice": 1})],
                                [RuntimeError("timeout")])
     assert solved == ["t1"] and results[0]["skipped"] == "already_answered"
+
+
+def test_every_llm_class_keeps_all_methods():
+    # 정리하다 메서드를 지우면(예: OpenAI chat_stream) 가짜 모델만 쓰는 다른 테스트로는 드러나지 않으므로 직접 확인한다
+    from app.llm import ClaudeLLM, FakeLLM, OpenAICompatibleLLM
+    for cls in (OpenAICompatibleLLM, ClaudeLLM, FakeLLM):
+        for name in ("complete_text", "chat_stream", "complete_vision_json", "stream_quiz", "warm"):
+            assert callable(getattr(cls, name, None)), f"{cls.__name__}.{name}"
+    for cls in (OpenAICompatibleLLM, ClaudeLLM):
+        assert callable(getattr(cls, "complete_json", None)), f"{cls.__name__}.complete_json"
