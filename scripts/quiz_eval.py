@@ -8,6 +8,9 @@
 - 키와 제공자는 .env(또는 환경변수)의 LLM_PROVIDER, LLM_API_KEY 를 앱과 같은 방식으로 읽는다. 값은 출력하지 않는다.
 - 모델은 --image-model / --text-model, 없으면 QUIZ_MODEL / QUIZ_MODEL_TEXT 를 쓴다.
 - 풀이는 /api/quiz/solve 와 같은 흐름(app/quiz_flow.py)을 쓰고, 퀴즈 서버에는 제출하지 않는다.
+- --server 주소를 주면 그 풀이 서버의 /api/quiz/solve 를 불러 잰다(모델은 그 서버의 설정을 따른다).
+  예: --server https://eval-sonnet---friend-agent-staging-....run.app  (트래픽 0% 이름표 리비전)
+  제출 정보(quiz_server, token)는 보내지 않으므로 퀴즈 서버에는 제출하지 않는다.
 - 형식은 tests/fixtures/quiz_eval/README.md 를 본다.
 """
 import argparse
@@ -81,16 +84,58 @@ def run(items, folder, image_model, text_model, repeat=1):
     return rows
 
 
+def remote_request(item, folder):
+    """시험지 항목을 풀이 서버 요청 하나로 바꾼다. (json 또는 None, files 또는 None, data 또는 None)"""
+    if item["mode"] == "hard":
+        path = folder / item["image"]
+        kind = mimetypes.guess_type(item["image"])[0] or "image/png"
+        data = {"type": item["type"], **({"choice_count": str(item["choice_count"])} if item.get("choice_count") else {})}
+        return None, {"photo": (path.name, path.read_bytes(), kind)}, data
+    if item.get("image"):
+        raise SystemExit(f"{item['id']}: 이지모드 그림 문제는 --server 로 잴 수 없습니다(그림 주소가 필요).")
+    return {"type": item["type"], "question": item["question"], "choices": item.get("choices")}, None, None
+
+
+def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time.sleep):
+    """풀이 서버를 불러 같은 문제를 repeat 번씩 푼다. 분당 요청 제한(429)이면 1분 기다렸다가 한 번 더 보낸다."""
+    import httpx
+    url = server.rstrip("/") + "/api/quiz/solve"
+    post = post or httpx.Client(timeout=90).post
+    rows = []
+    for item in items:
+        for n in range(repeat):
+            body, files, data = remote_request(item, folder)
+            started = time.perf_counter()
+            for attempt in range(2):
+                r = post(url, json=body) if body is not None else post(url, files=files, data=data)
+                if r.status_code != 429 or attempt:
+                    break
+                sleep(61)
+                started = time.perf_counter()
+            elapsed = round((time.perf_counter() - started) * 1000)
+            result = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            ok_status = r.status_code == 200
+            rows.append({"id": item["id"], "try": n + 1, "mode": item["mode"], "type": item["type"],
+                         "model": server.split("//")[-1].split("---")[0] if "---" in server else "server",
+                         "expected": item["answer"], "got": result.get("choice", result.get("text")),
+                         "ok": ok_status and correct(item, result), "reason": result.get("reason", ""),
+                         "timing": {**(result.get("timing") or {}), "round_trip": elapsed},
+                         "notes": [], "error": None if ok_status else f"HTTP {r.status_code}"})
+            if pause:
+                sleep(pause)
+    return rows
+
+
 def table(rows):
-    lines = ["| 문제 | 회 | 모드 | 모델 | 정답 | 모델 답 | 맞음 | 첫 토큰 | 답 확정 | 전체 | 근거 |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| 문제 | 회 | 모드 | 모델 | 정답 | 모델 답 | 맞음 | 첫 토큰 | 답 확정 | 전체 | 왕복 | 근거 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     sec = lambda ms: f"{ms / 1000:.2f}초" if isinstance(ms, (int, float)) else "-"
     for r in rows:
         t = r["timing"]
         got = r["error"] or r["got"]
         lines.append(f"| {r['id']} | {r['try']} | {r['mode']} | {r['model']} | {r['expected']} | {got} | "
                      f"{'O' if r['ok'] else 'X'} | {sec(t.get('first_token'))} | {sec(t.get('answer'))} | "
-                     f"{sec(t.get('total'))} | {r['reason']} |")
+                     f"{sec(t.get('total'))} | {sec(t.get('round_trip'))} | {r['reason']} |")
     return "\n".join(lines)
 
 
@@ -99,7 +144,9 @@ def summary(rows):
         return "풀 문제가 없습니다."
     total = [r["timing"]["total"] for r in rows if "total" in r["timing"]]
     answer = [r["timing"]["answer"] for r in rows if "answer" in r["timing"]]
+    first = [r["timing"]["first_token"] for r in rows if "first_token" in r["timing"]]
     out = [f"정답률 {sum(r['ok'] for r in rows)}/{len(rows)} ({100 * sum(r['ok'] for r in rows) / len(rows):.0f}%), "
+           f"평균 첫 토큰 {sum(first) / max(1, len(first)) / 1000:.2f}초, "
            f"평균 답 확정 {sum(answer) / max(1, len(answer)) / 1000:.2f}초, 평균 전체 {sum(total) / max(1, len(total)) / 1000:.2f}초"]
     for mode in sorted({r["mode"] for r in rows}):
         part = [r for r in rows if r["mode"] == mode]
@@ -115,7 +162,18 @@ def main(argv=None):
     parser.add_argument("--only", nargs="*")
     parser.add_argument("--image-model")
     parser.add_argument("--text-model")
+    parser.add_argument("--server", help="이 풀이 서버의 /api/quiz/solve 로 잰다(제출 정보는 보내지 않음)")
+    parser.add_argument("--pause", type=float, default=0.0, help="--server 일 때 요청 사이 쉬는 초(분당 제한 대비)")
     args = parser.parse_args(argv)
+
+    if args.server:
+        items = load_items(args.dir, args.only)
+        print(f"[풀이 서버 {args.server}, {len(items)}문제 x {args.repeat}회, 퀴즈 서버에는 제출하지 않음]")
+        rows = run_remote(items, args.dir, args.server, args.repeat, args.pause)
+        print(table(rows))
+        print()
+        print(summary(rows))
+        return rows
 
     from app.config import load_settings
     from app.llm import make_llm
