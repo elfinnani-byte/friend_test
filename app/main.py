@@ -87,6 +87,11 @@ def get_quiz_text_llm():
     return quiz_text_llm
 
 
+def rate_limited():
+    return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
+                        status_code=429)
+
+
 class ChatRequest(BaseModel):
     message: str
 
@@ -237,8 +242,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
     if not settings.quiz_enabled or model is None:
         raise HTTPException(404, "Not Found")  # 꺼져 있으면 없는 주소처럼 보인다
     if not quiz_limiter.allow(quiz.client_ip(request)):
-        return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
-                            status_code=429)
+        return rate_limited()
     # 단계별 시간(ms): receive 본문 받기, photo 사진 읽기·줄이기. 풀이 시간은 timing(요청 도착 기준)
     background.add_task(flush_quiz_trace)  # 성공이든 실패든 응답 뒤에 한 번 보낸다
     arrived = clock = time.perf_counter()
@@ -267,11 +271,6 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             target = submit_target(form)
             text, image, count, trace = quiz.hard_request(form.get("type"), form.get("choice_count"), data,
                                                           photo.content_type)
-            if settings.quiz_image_max_side:
-                small, kind = await run_in_threadpool(quiz.shrink_photo, data, image["media_type"],
-                                                      settings.quiz_image_max_side)
-                image = {"data": small, "media_type": kind}
-                trace["sent_bytes"] = len(small)
             lap("photo")
         else:
             try:
@@ -295,8 +294,8 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         result.update(done["submission"])
     result["timing"] = done["timing"]  # 새 칸(예전 앱은 무시한다)
     log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], model=chosen.model, fixed=done["notes"], ms=ms,
-        timing=done["timing"], photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
-        submit=target is not None, seen=done["seen"][:1000], think=done["think"][:500])
+        timing=done["timing"], photo_bytes=trace.get("photo_bytes"),
+        submit=target is not None, answer_raw=done["answer_raw"], seen=done["seen"][:1000], think=done["think"][:500])
     return result
 
 
@@ -323,8 +322,7 @@ async def quiz_warmup(request: Request, model=Depends(get_quiz_llm), text_model=
     if not settings.quiz_enabled or model is None:
         raise HTTPException(404, "Not Found")
     if not quiz_limiter.allow(quiz.client_ip(request)):
-        return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
-                            status_code=429)
+        return rate_limited()
     return {"warmed": await run_in_threadpool(warm_models, model, text_model)}
 
 
@@ -353,7 +351,8 @@ def auto_solver(image_model, text_model):
                                question=trace.get("question"), submit=make_submit(target), started=started)
         tracing.flush()
         log("INFO", "퀴즈 풀기", mode="auto", type=trace["type"], model=chosen.model, fixed=done["notes"],
-            timing=done["timing"], submit=True, seen=done["seen"][:1000], think=done["think"][:500])
+            timing=done["timing"], submit=True, answer_raw=done["answer_raw"], seen=done["seen"][:1000],
+            think=done["think"][:500])
         return {**done["result"], **(done["submission"] or {}), "timing": done["timing"]}
 
     return solve_question
@@ -387,8 +386,7 @@ async def quiz_auto_start(req: AutoStart, request: Request, background: Backgrou
     if model is None:
         raise HTTPException(404, "Not Found")
     if not quiz_limiter.allow(quiz.client_ip(request)):
-        return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
-                            status_code=429)
+        return rate_limited()
     base = quiz.allowed_server(req.quiz_server, settings.quiz_server_allowlist)
     if base is None:
         return JSONResponse({"error": "quiz_error", "message": "허용되지 않은 퀴즈 서버 주소입니다."}, status_code=400)

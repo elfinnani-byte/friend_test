@@ -562,7 +562,6 @@ def test_short_reason_is_not_marked_cut(quiz_on, capsys):
     assert "reason_cut" not in solve_log(capsys)["fixed"]
 
 
-
 @pytest.mark.parametrize("reason, expected", [
     ("상식: 대한민국 수도는 서울", "대한민국 수도는 서울"),
     ("개수 세기: 빨간 원 5개", "빨간 원 5개"),
@@ -574,3 +573,104 @@ def test_short_reason_is_not_marked_cut(quiz_on, capsys):
 ])
 def test_reason_label_prefix_is_removed(reason, expected):
     assert quiz.clip_reason(reason) == expected
+
+
+# ── 객관식: 번호와 고른 보기 글을 함께 받아 맞춰 보기 ───────────────────
+
+NUMERIC = ["10", "3", "7", "2"]
+
+
+@pytest.mark.parametrize("answer, choices, number, fixed", [
+    ("2 (3)", NUMERIC, 2, None),                         # 번호와 글이 맞음
+    ("3 (3)", NUMERIC, 2, "number_from_text"),           # 번호가 틀림(보기 글 "3" 을 번호로 씀) → 글을 믿는다
+    ("3", NUMERIC, 3, None),                             # 글이 없으면 번호 그대로
+    ("2 ([20, 40])", ["[20, 30, 40]", "[20, 40]"], 2, None),
+    ("1 ([20, 40])", ["[20, 30, 40]", "[20, 40]"], 2, "number_from_text"),
+    ("2 [20, 40]", ["[20, 30, 40]", "[20, 40]"], 2, None),
+    ("②（서울）", ["부산", "서울"], 2, None),             # 동그라미 숫자, 전각 괄호
+    ("서울", ["부산", "서울"], 2, "number_from_text"),     # 번호 없이 글만
+    ("4 (광주)", ["부산", "인천", "서울", "대구"], 4, None),  # 목록에 없는 글이면 번호
+    ("3 (아무 글)", None, 3, None),                         # 하드모드: 보기 목록이 없어 번호
+    ("(모름)", None, None, None),
+])
+def test_choice_number_with_text(answer, choices, number, fixed):
+    assert quiz_flow._choice(answer, 4, choices) == (number, fixed)
+
+
+def test_numeric_choices_trust_text_end_to_end(quiz_on, capsys):
+    llm = StreamLLM(["ANSWER: 3 (3)\n", "REASON: 가장 작은 홀수\n"])
+    use(llm, llm)
+    body = easy(type="choice", question="가장 작은 홀수는?", choices=NUMERIC).json()
+    assert body["choice"] == 1  # 보기 "3" 은 두 번째(0부터 1)
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert "number_from_text" in line["fixed"] and line["answer_raw"] == "3 (3)"
+
+
+def test_prompt_asks_number_with_choice_text():
+    for system in (quiz_flow.TEXT_SYSTEM, quiz_flow.IMAGE_SYSTEM):
+        assert "'번호 (고른 보기 글)'" in system and "ANSWER: 2 (200)" in system
+
+
+# ── 직접 풀기: 실패한 문제는 한 번 더 ────────────────────────────────
+
+def run_auto(responses, outcomes):
+    """퀴즈 서버 응답과, 풀 때마다 돌려줄 결과(예외면 냄)를 차례로 써서 AutoRun 하나를 끝까지 돌린다."""
+    queue, results, solved = list(responses), list(outcomes), []
+
+    def handler(request):
+        return httpx.Response(200, json=queue.pop(0) if queue else question(state="finished"))
+
+    def solve_question(base, token, q):
+        solved.append(q["id"])
+        outcome = results.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    manager = quiz_auto.AutoManager(solve_question, httpx.Client(transport=httpx.MockTransport(handler)),
+                                    sleep=lambda s: None)
+    manager.start(QUIZ_SERVER, TEAM_TOKEN, background=False)
+    return solved, manager.status(TEAM_TOKEN)["results"]
+
+
+OK = {"choice": 1, "reason": "r", "submitted": True, "answer_status": 200}
+
+
+def test_auto_retries_once_after_error():
+    solved, results = run_auto([question(qid="t1"), question(qid="t1"), question(qid="t1")],
+                               [quiz.QuizError(502, "x"), OK])
+    assert solved == ["t1", "t1"]  # 실패 뒤 한 번 더 풀고, 성공했으므로 세 번째 확인에서는 풀지 않는다
+    assert [r.get("attempt") for r in reversed(results)] == [1, 2] and results[0]["submitted"] is True
+
+
+def test_auto_gives_up_after_two_attempts():
+    solved, results = run_auto([question(qid="t1")] * 4, [RuntimeError("a"), RuntimeError("b")])
+    assert solved == ["t1", "t1"] and results[0]["attempt"] == 2 and "retry" not in results[0]
+
+
+@pytest.mark.parametrize("submit, retried", [
+    ({"submitted": False, "answer_status": None, "submit_error": "연결 실패"}, True),
+    ({"submitted": False, "answer_status": 503, "submit_error": "서버 오류"}, True),
+    ({"submitted": False, "answer_status": 409, "submit_error": "이미 냄"}, False),
+    ({"submitted": False, "answer_status": 422, "submit_error": "형식"}, False),
+])
+def test_auto_retries_only_when_submit_may_succeed(submit, retried):
+    solved, _ = run_auto([question(qid="t1"), question(qid="t1")], [{"choice": 1, "reason": "r", **submit}, OK])
+    assert solved == (["t1", "t1"] if retried else ["t1"])
+
+
+def test_auto_does_not_retry_when_answer_already_recorded():
+    # 앞 시도가 실패로 보였어도 퀴즈 서버에 이미 답이 있으면(my_answer) 다시 내지 않는다
+    solved, results = run_auto([question(qid="t1"), question(qid="t1", my_answer={"choice": 1})],
+                               [RuntimeError("timeout")])
+    assert solved == ["t1"] and results[0]["skipped"] == "already_answered"
+
+
+def test_every_llm_class_keeps_all_methods():
+    # 정리하다 메서드를 지우면(예: OpenAI chat_stream) 가짜 모델만 쓰는 다른 테스트로는 드러나지 않으므로 직접 확인한다
+    from app.llm import ClaudeLLM, FakeLLM, OpenAICompatibleLLM
+    for cls in (OpenAICompatibleLLM, ClaudeLLM, FakeLLM):
+        for name in ("complete_text", "chat_stream", "complete_vision_json", "stream_quiz", "warm"):
+            assert callable(getattr(cls, name, None)), f"{cls.__name__}.{name}"
+    for cls in (OpenAICompatibleLLM, ClaudeLLM):
+        assert callable(getattr(cls, "complete_json", None)), f"{cls.__name__}.complete_json"
