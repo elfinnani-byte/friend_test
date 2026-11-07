@@ -6,7 +6,24 @@ from app import main, quiz
 from app.config import QUIZ_MAX_PHOTO_BYTES
 from app.llm import FakeLLM
 
-client = TestClient(main.app)
+class OldShapeClient(TestClient):
+    """예전 응답 항목이 그대로인지 보려고, 새로 더한 timing 칸만 빼고 비교하게 한다(timing 은 test_quiz_monday 에서 따로 본다)."""
+
+    def request(self, *args, **kwargs):
+        response = super().request(*args, **kwargs)
+        original = response.json
+
+        def json_without_timing(**kw):
+            data = original(**kw)
+            if isinstance(data, dict):
+                data.pop("timing", None)
+            return data
+
+        response.json = json_without_timing
+        return response
+
+
+client = OldShapeClient(main.app)
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
 
@@ -411,8 +428,8 @@ def test_timing_is_logged(solver, capsys):
     solver({"answer": "5", "reason": "r"})
     hard(type="short")
     line = next(_json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
-    assert set(line["ms"]) == {"receive", "photo", "llm", "respond"}
-    assert line["total_ms"] == sum(line["ms"].values())
+    assert set(line["ms"]) == {"receive", "photo"}  # 풀이 시간은 timing(요청 도착 기준)으로 옮겼다
+    assert {"answer", "total"} <= set(line["timing"])
 
 
 def test_trace_is_flushed_after_response(solver, monkeypatch):
@@ -739,7 +756,7 @@ def test_retry_after_unreadable_model_output(solver):
     # 첫 답이 JSON 이 아니어서 읽지 못해도(예외) 번호만 다시 묻는다
     llm = use_llm(SequenceLLM(ValueError("JSON 응답을 찾지 못했습니다."), {"answer": "②"}))
     r = hard(type="choice", choice_count=4)
-    assert r.json() == {"choice": 1, "reason": "보기 번호만 다시 물어 고른 답입니다."} and len(llm.calls) == 2
+    assert r.json() == {"choice": 1, "reason": quiz.RETRY_REASON} and len(llm.calls) == 2
 
 
 def test_fallback_to_first_when_retry_fails(solver, capsys):

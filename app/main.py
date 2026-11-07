@@ -16,25 +16,31 @@ import os
 import time
 from urllib.parse import urlsplit
 
+import httpx
+
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, gate, ocr, quiz, tracing, when
+from app import agent, gate, ocr, quiz, quiz_auto, quiz_flow, tracing, when
 from app.auth import Auth, User
-from app.config import QUIZ_MAX_PHOTO_BYTES, QUIZ_MAX_TOKENS, ROOT, load_settings
+from app.config import QUIZ_AUTO_MAX_SECONDS, QUIZ_MAX_PHOTO_BYTES, ROOT, load_settings
 from app.llm import make_llm
-from app.logs import log
+from app.logs import log, mask_access_log
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
 from app.store.base import make_store
 from app.tools import CITIES
 
+mask_access_log()  # 접속 로그 주소의 token= 값을 가린다
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
 tracing.setup(settings)  # .env 를 읽은 뒤에 켜야 Langfuse 키를 찾는다. 키가 없으면 꺼진다
 llm = make_llm(settings)
-quiz_llm = make_llm(settings, settings.quiz_model) if settings.quiz_enabled else None
+quiz_llm = make_llm(settings, settings.quiz_model) if settings.quiz_enabled else None  # 그림 문제 모델
+# 글 문제 모델(QUIZ_MODEL_TEXT). 비어 있으면 None → 그림 문제 모델을 같이 쓴다
+quiz_text_llm = make_llm(settings, settings.quiz_model_text) if settings.quiz_enabled and settings.quiz_model_text else None
 quiz_limiter = quiz.RateLimiter(settings.quiz_rate_per_minute)
+quiz_auto_manager = quiz_auto.AutoManager(max_seconds=QUIZ_AUTO_MAX_SECONDS)  # 서버 직접 풀기(인스턴스 메모리)
 quiz_submitter = quiz.AnswerSubmitter()  # 퀴즈 서버 연결을 재사용한다(만들 때 연결하지 않는다)
 for _pattern in settings.quiz_server_allowlist:
     quiz.server_pattern(_pattern)  # 허용 목록이 잘못 적혔으면 시작할 때 바로 알린다
@@ -75,6 +81,10 @@ def get_llm():
 
 def get_quiz_llm():
     return quiz_llm
+
+
+def get_quiz_text_llm():
+    return quiz_text_llm
 
 
 class ChatRequest(BaseModel):
@@ -214,7 +224,8 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
 
 
 @app.post("/api/quiz/solve")
-async def solve_quiz(request: Request, background: BackgroundTasks, model=Depends(get_quiz_llm)):
+async def solve_quiz(request: Request, background: BackgroundTasks, model=Depends(get_quiz_llm),
+                     text_model=Depends(get_quiz_text_llm)):
     """문제 하나를 푼다. JSON(이지모드) 또는 multipart 사진(하드모드). 크레딧은 차감하지 않는다.
 
     quiz_server, token, question_id 를 함께 보내면 답을 정한 뒤 퀴즈 서버에 바로 제출하고
@@ -228,9 +239,9 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
     if not quiz_limiter.allow(quiz.client_ip(request)):
         return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
                             status_code=429)
-    # 단계별 시간(ms): receive 본문 받기, photo 사진 읽기·줄이기, llm 모델 호출, respond 답 정리
+    # 단계별 시간(ms): receive 본문 받기, photo 사진 읽기·줄이기. 풀이 시간은 timing(요청 도착 기준)
     background.add_task(flush_quiz_trace)  # 성공이든 실패든 응답 뒤에 한 번 보낸다
-    clock = time.perf_counter()
+    arrived = clock = time.perf_counter()
     ms = {}
 
     def lap(name):
@@ -271,67 +282,154 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
             target = submit_target(body if isinstance(body, dict) else {})
             text, image, count, trace = quiz.easy_request(body)
 
-        def call():
-            # 모델은 한 번만 부른다. Langfuse 에는 사진 내용 대신 크기와 종류만 남긴다
-            started = time.perf_counter()
-            with tracing.observe("quiz-solve", "generation", model=model.model, input=trace,
-                                 metadata={"mode": trace["mode"], "type": trace["type"]}):
-                answer = model.complete_vision_json(quiz.SYSTEM, text, image, QUIZ_MAX_TOKENS, trace)
-            return answer, round((time.perf_counter() - started) * 1000)
-
-        try:
-            answer, ms["llm"] = await run_in_threadpool(call)
-            clock = time.perf_counter()
-            result, notes = quiz.to_result(answer, count, trace.get("choices"), trace.get("question"))
-        except quiz.QuizError:
-            raise
-        except Exception as error:
-            if not count:  # 단답은 그대로 실패로 알린다
-                log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__)
-                raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.") from None
-            # 객관식은 답을 안 내면 0점이다. 번호를 못 찾았거나 답을 읽지 못했으면 번호만 한 번 더 묻고, 그래도 없으면 1번을 낸다
-            log("WARNING", "퀴즈 보기 번호를 다시 물음", mode=trace["mode"], error=type(error).__name__)
-            clock = time.perf_counter()
-            result, notes = await run_in_threadpool(retry_choice, model, text, image, count, trace,
-                                                    getattr(error, "reason", ""))
-            lap("llm_retry")
-        lap("respond")
-        if target is not None:
-            answer_part = {k: result[k] for k in ("choice", "text") if k in result}
-            status, elapsed, problem, response = await run_in_threadpool(quiz_submitter.submit_with_body, target,
-                                                                         answer_part, result["reason"])
-            lap("submit")
-            result.update(submitted=problem is None, answer_status=status, elapsed=elapsed)
-            if problem:
-                result["submit_error"] = problem
-            # 토큰과 이유 글은 남기지 않는다. 호스트, 보낸 답(값과 타입), 퀴즈 서버 응답 본문, 결과를 남긴다
-            log("INFO" if problem is None else "WARNING", "퀴즈 답 제출", host=urlsplit(target["base"]).hostname,
-                sent=quiz.answer_for_log(target["question_id"], answer_part), response=response,
-                status=status, ok=problem is None, ms=ms.get("submit"))
+        # 그림이 있으면 그림 모델(QUIZ_MODEL), 없으면 글 모델(QUIZ_MODEL_TEXT). 스트리밍으로 받아 근거가 끝나면 바로 제출
+        chosen = quiz_flow.pick_models(image, model, text_model)
+        submit = make_submit(target) if target is not None else None
+        done = await run_in_threadpool(lambda: quiz_flow.solve(
+            chosen, text, image, count, trace, choices=trace.get("choices"), question=trace.get("question"),
+            submit=submit, started=arrived))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
-    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], fixed=notes, ms=ms,
-        total_ms=sum(ms.values()), photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
-        submit=target is not None)
+    result = dict(done["result"])
+    if done["submission"] is not None:
+        result.update(done["submission"])
+    result["timing"] = done["timing"]  # 새 칸(예전 앱은 무시한다)
+    log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], model=chosen.model, fixed=done["notes"], ms=ms,
+        timing=done["timing"], photo_bytes=trace.get("photo_bytes"), sent_bytes=trace.get("sent_bytes"),
+        submit=target is not None, seen=done["seen"][:1000], think=done["think"][:500])
     return result
 
 
-def retry_choice(model, text, image, count, trace, first_reason):
-    """객관식 번호만 한 번 더 짧게 묻는다. 그래도 번호가 없거나 호출이 실패하면 1번(choice 0)을 낸다."""
-    try:
-        with tracing.observe("quiz-retry-choice", "generation", model=model.model, input=trace,
-                             metadata={"mode": trace["mode"], "type": trace["type"]}):
-            again = model.complete_vision_json(quiz.RETRY_SYSTEM, text + "\n보기 번호만 답한다.", image, QUIZ_MAX_TOKENS,
-                                               trace)
-        number = quiz.choice_number(again.get("answer") if isinstance(again, dict) else None, count)
-    except Exception as error:
-        log("WARNING", "퀴즈 보기 번호 다시 묻기 실패", error=type(error).__name__)
-        number = None
-    if number is not None:
-        reason = first_reason or "보기 번호만 다시 물어 고른 답입니다."
-        return {"choice": number - 1, "reason": reason[:300]}, ["retry_number"]
-    log("WARNING", "퀴즈 보기 번호를 못 찾아 1번을 냄", mode=trace["mode"])
-    return {"choice": 0, "reason": quiz.FALLBACK_REASON}, ["fallback_first"]
+# ── 미리 깨우기, 서버 직접 풀기 ───────────────────────────────────
+
+def warm_models(image_model, text_model):
+    """그림 문제용·글 문제용 모델에 아주 짧은 요청을 한 번씩 보내 연결과 지시문 캐시를 준비한다."""
+    jobs = [(image_model, quiz_flow.IMAGE_SYSTEM, "image"), (text_model or image_model, quiz_flow.TEXT_SYSTEM, "text")]
+    results = []
+    for model, system, kind in jobs:
+        started = time.perf_counter()
+        try:
+            info = model.warm(system) or {}
+            results.append({"kind": kind, "model": model.model, "ok": True, "ms": quiz_flow.elapsed_ms(started), **info})
+        except Exception as error:
+            results.append({"kind": kind, "model": model.model, "ok": False, "ms": quiz_flow.elapsed_ms(started),
+                            "error": type(error).__name__})
+    log("INFO", "퀴즈 모델 미리 깨움", results=results)
+    return results
+
+
+@app.post("/api/quiz/warmup")
+async def quiz_warmup(request: Request, model=Depends(get_quiz_llm), text_model=Depends(get_quiz_text_llm)):
+    if not settings.quiz_enabled or model is None:
+        raise HTTPException(404, "Not Found")
+    if not quiz_limiter.allow(quiz.client_ip(request)):
+        return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
+                            status_code=429)
+    return {"warmed": await run_in_threadpool(warm_models, model, text_model)}
+
+
+def auto_solver(image_model, text_model):
+    """서버 직접 풀기가 이지모드 문제 하나를 푸는 함수. 그림이 있으면 퀴즈 서버에서 토큰으로 받아 함께 보낸다."""
+
+    def solve_question(base, token, question):
+        started = time.perf_counter()
+        image_url = question.get("image_url")
+        full_url = image_url if not image_url or image_url.startswith("http") else f"{base}/{image_url.lstrip('/')}"
+        text, image, count, trace = quiz.easy_request({"type": question.get("type"), "question": question.get("text"),
+                                                       "choices": question.get("choices"), "image_url": full_url})
+        if full_url and full_url.startswith(base):
+            # 퀴즈 서버 그림은 토큰이 필요할 수 있어, 서버가 받아 바이트로 넘긴다(받지 못하면 주소 그대로)
+            try:
+                r = quiz_auto_manager.http.get(full_url, headers={"Authorization": f"Bearer {token}"})
+                kind = r.headers.get("content-type", "").split(";")[0].strip()
+                if r.is_success and kind in quiz.PHOTO_TYPES:
+                    image = {"data": r.content, "media_type": kind}
+            except httpx.HTTPError as error:
+                log("WARNING", "퀴즈 그림 받기 실패", error=type(error).__name__)
+        trace["mode"] = "auto"
+        chosen = quiz_flow.pick_models(image, image_model, text_model)
+        target = {"base": base, "token": token, "question_id": question["id"]}
+        done = quiz_flow.solve(chosen, text, image, count, trace, choices=trace.get("choices"),
+                               question=trace.get("question"), submit=make_submit(target), started=started)
+        tracing.flush()
+        log("INFO", "퀴즈 풀기", mode="auto", type=trace["type"], model=chosen.model, fixed=done["notes"],
+            timing=done["timing"], submit=True, seen=done["seen"][:1000], think=done["think"][:500])
+        return {**done["result"], **(done["submission"] or {}), "timing": done["timing"]}
+
+    return solve_question
+
+
+class AutoStart(BaseModel):
+    quiz_server: str
+    token: str
+
+
+class AutoStop(BaseModel):
+    token: str
+
+
+def auto_enabled():
+    if not (settings.quiz_enabled and settings.quiz_auto_enabled):
+        raise HTTPException(404, "Not Found")
+
+
+def auto_token(token):
+    if not token or len(token) > 1000 or any(c in token for c in "\r\n"):
+        raise HTTPException(400, "token 형식이 올바르지 않습니다.")
+    return token
+
+
+@app.post("/api/quiz/auto/start")
+async def quiz_auto_start(req: AutoStart, request: Request, background: BackgroundTasks,
+                          model=Depends(get_quiz_llm), text_model=Depends(get_quiz_text_llm)):
+    """서버가 퀴즈 서버를 직접 확인하며 이지모드 문제를 풀어 낸다. 같은 token 으로는 하나만 돈다."""
+    auto_enabled()
+    if model is None:
+        raise HTTPException(404, "Not Found")
+    if not quiz_limiter.allow(quiz.client_ip(request)):
+        return JSONResponse({"error": "rate_limited", "message": "요청이 너무 많아요. 1분 뒤 다시 보내 주세요."},
+                            status_code=429)
+    base = quiz.allowed_server(req.quiz_server, settings.quiz_server_allowlist)
+    if base is None:
+        return JSONResponse({"error": "quiz_error", "message": "허용되지 않은 퀴즈 서버 주소입니다."}, status_code=400)
+    started, snapshot = quiz_auto_manager.start(base, auto_token(req.token), auto_solver(model, text_model))
+    if started:
+        background.add_task(warm_models, model, text_model)  # 시작할 때 한 번 미리 깨운다(응답 뒤)
+    return {"started": started, **snapshot}
+
+
+@app.post("/api/quiz/auto/stop")
+async def quiz_auto_stop(req: AutoStop):
+    auto_enabled()
+    return {"stopped": quiz_auto_manager.stop(auto_token(req.token))}
+
+
+@app.get("/api/quiz/auto/status")
+async def quiz_auto_status(request: Request, token: str | None = None):
+    """token 은 쿼리(?token=) 또는 Authorization: Bearer 헤더로 받는다. 헤더 쪽이 주소 로그에 남지 않아 안전하다."""
+    auto_enabled()
+    header = request.headers.get("authorization", "")
+    token = token or (header[7:].strip() if header.lower().startswith("bearer ") else "")
+    snapshot = quiz_auto_manager.status(auto_token(token))
+    return snapshot if snapshot is not None else {"running": False, "stop_reason": None, "results": []}
+
+
+def make_submit(target):
+    """퀴즈 서버 제출 함수. 응답에 붙일 submitted, answer_status, elapsed(, submit_error) 를 돌려준다.
+    토큰과 근거 글은 로그에 남기지 않는다. 호스트, 보낸 답(값과 타입), 퀴즈 서버 응답 본문, 결과만 남긴다."""
+
+    def submit(answer_part, reason):
+        started = time.perf_counter()
+        status, elapsed, problem, response = quiz_submitter.submit_with_body(target, answer_part, reason)
+        log("INFO" if problem is None else "WARNING", "퀴즈 답 제출", host=urlsplit(target["base"]).hostname,
+            sent=quiz.answer_for_log(target["question_id"], answer_part), response=response,
+            status=status, ok=problem is None, ms=round((time.perf_counter() - started) * 1000))
+        out = {"submitted": problem is None, "answer_status": status, "elapsed": elapsed}
+        if problem:
+            out["submit_error"] = problem
+        return out
+
+    return submit
 
 
 def submit_target(fields):

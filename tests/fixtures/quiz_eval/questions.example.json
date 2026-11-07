@@ -1,0 +1,6 @@
+[
+  {"id": "easy-http", "mode": "easy", "type": "choice", "question": "성공을 뜻하는 HTTP 상태 코드는?",
+   "choices": ["404", "200", "500", "301"], "answer": 1, "note": "형식 예시(그림 없음)"},
+  {"id": "easy-len", "mode": "easy", "type": "short", "question": "파이썬에서 print(len(\"hello\") * 2) 의 출력은? (숫자만)",
+   "answer": "10", "note": "형식 예시(그림 없음)"}
+]
