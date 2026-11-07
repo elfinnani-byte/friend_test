@@ -293,6 +293,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
     if done["submission"] is not None:
         result.update(done["submission"])
     result["timing"] = done["timing"]  # 새 칸(예전 앱은 무시한다)
+    result["timings"] = quiz_flow.app_timings(done["timing"])  # 앱이 읽는 이름(first_token_ms, submit_ms, reason_ms)
     log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], model=chosen.model, fixed=done["notes"], ms=ms,
         timing=done["timing"], photo_bytes=trace.get("photo_bytes"),
         submit=target is not None, answer_raw=done["answer_raw"], seen=done["seen"][:1000], think=done["think"][:500])
@@ -353,7 +354,8 @@ def auto_solver(image_model, text_model):
         log("INFO", "퀴즈 풀기", mode="auto", type=trace["type"], model=chosen.model, fixed=done["notes"],
             timing=done["timing"], submit=True, answer_raw=done["answer_raw"], seen=done["seen"][:1000],
             think=done["think"][:500])
-        return {**done["result"], **(done["submission"] or {}), "timing": done["timing"]}
+        return {**done["result"], **(done["submission"] or {}), "timing": done["timing"],
+                "timings": quiz_flow.app_timings(done["timing"])}
 
     return solve_question
 

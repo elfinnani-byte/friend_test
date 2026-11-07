@@ -7,7 +7,7 @@ from app.config import QUIZ_MAX_PHOTO_BYTES
 from app.llm import FakeLLM
 
 class OldShapeClient(TestClient):
-    """예전 응답 항목이 그대로인지 보려고, 새로 더한 timing 칸만 빼고 비교하게 한다(timing 은 test_quiz_monday 에서 따로 본다)."""
+    """예전 응답 항목이 그대로인지 보려고, 새로 더한 timing·timings 칸만 빼고 비교하게 한다(둘은 test_quiz_monday 에서 따로 본다)."""
 
     def request(self, *args, **kwargs):
         response = super().request(*args, **kwargs)
@@ -17,6 +17,7 @@ class OldShapeClient(TestClient):
             data = original(**kw)
             if isinstance(data, dict):
                 data.pop("timing", None)
+                data.pop("timings", None)
             return data
 
         response.json = json_without_timing

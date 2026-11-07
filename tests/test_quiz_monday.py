@@ -135,7 +135,7 @@ def test_old_app_without_submit_gets_old_fields_plus_timing(quiz_on, quiz_server
     use(llm, llm)
     body = hard(type="choice", choice_count=4).json()
     assert body["choice"] == 2 and body["reason"] == "서울이 수도" and "submitted" not in body
-    assert set(body) == {"choice", "reason", "timing"} and quiz_server["seen"] == []
+    assert set(body) == {"choice", "reason", "timing", "timings"} and quiz_server["seen"] == []
 
 
 def test_timing_order(quiz_on, quiz_server):
@@ -695,3 +695,34 @@ def test_every_llm_class_keeps_all_methods():
             assert callable(getattr(cls, name, None)), f"{cls.__name__}.{name}"
     for cls in (OpenAICompatibleLLM, ClaudeLLM):
         assert callable(getattr(cls, "complete_json", None)), f"{cls.__name__}.complete_json"
+
+
+# ── 앱이 읽는 시간 칸(timings) ────────────────────────────────────────
+
+def test_app_timings_names_and_integers():
+    t = {"first_token": 812, "answer": 1300, "submitted": 1650, "reason_sent": 1650, "total": 1660}
+    assert quiz_flow.app_timings(t) == {"first_token_ms": 812, "submit_ms": 1650, "reason_ms": 1650}
+    assert quiz_flow.app_timings({"first_token": 5.0, "answer": 9}) == {"first_token_ms": 5}  # 제출 안 하면 그 칸은 없다
+    assert all(isinstance(v, int) for v in quiz_flow.app_timings({"first_token": 5.0}).values())
+
+
+def test_solve_response_has_timing_and_timings(quiz_on, quiz_server):
+    llm = StreamLLM(["ANSWER: 1\n", "REASON: 근거\n"])
+    use(llm, llm)
+    body = easy(type="short", question="?", **submit_fields()).json()
+    t, ts = body["timing"], body["timings"]
+    assert set(t) == {"first_token", "answer", "submitted", "reason_sent", "total"}  # 기존 칸은 그대로
+    assert ts == {"first_token_ms": t["first_token"], "submit_ms": t["submitted"], "reason_ms": t["reason_sent"]}
+    body = easy(type="short", question="?").json()  # 제출 정보가 없으면 제출 시간 칸은 없다
+    assert set(body["timings"]) == {"first_token_ms"}
+
+
+def test_auto_results_have_timings(quiz_on, quiz_server, monkeypatch):
+    monkeypatch.setattr(main, "quiz_auto_manager", quiz_auto.AutoManager(http=httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(404)))))
+    llm = StreamLLM(["ANSWER: 2\nREASON: 서울이 수도\n"])
+    out = main.auto_solver(llm, llm)(QUIZ_SERVER, TEAM_TOKEN, {"id": "t1", "type": "choice", "text": "수도는?",
+                                                              "choices": ["부산", "서울"]})
+    assert set(out["timing"]) >= {"first_token", "submitted"}
+    assert out["timings"] == quiz_flow.app_timings(out["timing"]) and set(out["timings"]) == {
+        "first_token_ms", "submit_ms", "reason_ms"}
