@@ -63,8 +63,10 @@ def test_logout(monkeypatch):
 BEFORE = {"/login", "/api/login", "/api/logout", "/health"}  # 퀴즈 API 전부터 열려 있던 경로
 
 
-def test_only_quiz_solve_was_added_to_open_paths():
-    assert gate.OPEN_PATHS - BEFORE == {"/api/quiz/solve"}
+def test_only_quiz_paths_were_added_to_open_paths():
+    # 비밀번호에서 빠진 것은 퀴즈 앱이 부르는 퀴즈 API 다섯 개뿐이다
+    assert gate.OPEN_PATHS - BEFORE == {"/api/quiz/solve", "/api/quiz/warmup", "/api/quiz/auto/start",
+                                        "/api/quiz/auto/stop", "/api/quiz/auto/status"}
     assert BEFORE <= gate.OPEN_PATHS
 
 

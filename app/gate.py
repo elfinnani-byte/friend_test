@@ -21,9 +21,10 @@ from app.logs import log
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
 COOKIE = "fa_gate"
 MAX_AGE = 60 * 60 * 24 * 7  # 7일 동안 다시 묻지 않는다
-# 비밀번호 없이 열리는 경로. /api/quiz/solve 는 퀴즈 대결 앱(쿠키 없음)이 부르므로 뺀다.
-# 대신 QUIZ_SOLVER_ENABLED, 사진 5MB, IP 당 분당 요청 수로 막는다(app/quiz.py)
-OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/health", "/api/quiz/solve"}
+# 비밀번호 없이 열리는 경로. 퀴즈 대결 앱(쿠키 없음)이 부르는 퀴즈 API 만 뺀다.
+# 대신 QUIZ_SOLVER_ENABLED(직접 풀기는 QUIZ_AUTO_ENABLED 도), 사진 5MB, IP 당 분당 요청 수, 퀴즈 서버 허용 목록으로 막는다
+QUIZ_PATHS = {"/api/quiz/solve", "/api/quiz/warmup", "/api/quiz/auto/start", "/api/quiz/auto/stop", "/api/quiz/auto/status"}
+OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/health"} | QUIZ_PATHS
 
 router = APIRouter()
 

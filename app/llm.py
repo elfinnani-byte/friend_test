@@ -48,6 +48,39 @@ class OpenAICompatibleLLM:
         self.record(None, response.model, messages, text, response.usage)
         return text
 
+    def _vision_messages(self, system, text, image):
+        content = [{"type": "text", "text": text}]
+        if image is not None:
+            url = image["url"] if "url" in image else \
+                f"data:{image['media_type']};base64,{base64.b64encode(image['data']).decode()}"
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+
+    def _limit(self, max_tokens):
+        # OpenAI 주소는 max_completion_tokens, 호환 주소(Gemini)는 max_tokens 로 출력 상한을 준다
+        return {"max_completion_tokens": max_tokens} if self.stream_usage else {"max_tokens": max_tokens}
+
+    def stream_quiz(self, system, text, image, max_tokens, trace_input):
+        """퀴즈 풀기 스트리밍. 글 조각을 만들어지는 대로 돌려준다(줄 형식 ANSWER/REASON 등은 부르는 쪽이 읽는다).
+        도중에 그만 읽으면(답을 냈을 때) 그때까지의 글만 트레이스에 남긴다."""
+        response = self.client.chat.completions.create(
+            model=self.model, messages=self._vision_messages(system, text, image), stream=True, **self._limit(max_tokens))
+        out, model = "", None
+        try:
+            for event in response:
+                model = getattr(event, "model", None) or model
+                if event.choices and event.choices[0].delta.content:
+                    out += event.choices[0].delta.content
+                    yield event.choices[0].delta.content
+        finally:
+            response.close()
+            tracing.record(None, model=model or self.model, input=trace_input, output=out)
+
+    def warm(self, system, max_tokens=8):
+        """연결을 미리 만든다(아주 짧은 요청 한 번)."""
+        self.client.chat.completions.create(model=self.model, messages=self._vision_messages(system, "준비", None),
+                                            **self._limit(max_tokens))
+
     def complete_vision_json(self, system, text, image, max_tokens, trace_input):
         """이미지 한 장(image: {"url"} 또는 {"data", "media_type"})과 질문으로 JSON 하나를 받는다."""
         content = [{"type": "text", "text": text}]
@@ -155,6 +188,62 @@ class ClaudeLLM:
     # 서버 쪽 대체 모델(fallbacks)을 받는 모델. Haiku 등 다른 모델에는 보내지 않는다
     FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
 
+    # 생각(thinking)을 끌 수 있는 모델. Claude Opus 5.5, Sonnet 5.5, Fable 은 끄면 400 이라 effort low 로만 줄인다
+    THINKING_OFF_MODELS = {"claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7"}
+
+    @staticmethod
+    def _vision_content(text, image):
+        if image is None:
+            return [{"type": "text", "text": text}]
+        source = {"type": "url", "url": image["url"]} if "url" in image else \
+            {"type": "base64", "media_type": image["media_type"], "data": base64.standard_b64encode(image["data"]).decode()}
+        return [{"type": "image", "source": source}, {"type": "text", "text": text}]
+
+    def _quiz_request(self, system, content, max_tokens):
+        """매번 같은 지시문은 프롬프트 캐싱. 빠른 모드(speed)는 쓰지 않는다."""
+        request = dict(model=self.model, max_tokens=max_tokens, output_config=self.OUTPUT_CONFIG,
+                       system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                       messages=[{"role": "user", "content": content}])
+        if self.model in self.THINKING_OFF_MODELS:
+            request["thinking"] = {"type": "disabled"}
+        return request
+
+    def _stream(self, request):
+        if self.model in self.FALLBACK_MODELS:
+            return self.client.beta.messages.stream(**request, betas=self.BETAS, fallbacks="default")
+        return self.client.messages.stream(**request)
+
+    def stream_quiz(self, system, text, image, max_tokens, trace_input):
+        """퀴즈 풀기 스트리밍. 글 조각을 만들어지는 대로 돌려준다. 도중에 그만 읽으면 스트림을 닫는다."""
+        out, final = "", None
+        try:
+            with self._stream(self._quiz_request(system, self._vision_content(text, image), max_tokens)) as stream:
+                for piece in stream.text_stream:
+                    out += piece
+                    yield piece
+                final = stream.get_final_message()
+        finally:
+            if final is not None:
+                self.record(None, final, trace_input, out)
+                usage = getattr(final, "usage", None)
+                log("INFO", "퀴즈 모델 토큰", model=getattr(final, "model", None) or self.model,
+                    input=getattr(usage, "input_tokens", None), output=getattr(usage, "output_tokens", None),
+                    cache_read=getattr(usage, "cache_read_input_tokens", None),
+                    cache_write=getattr(usage, "cache_creation_input_tokens", None))
+            else:  # 답을 내고 일찍 그만 읽었다
+                tracing.record(None, model=self.model, input=trace_input, output=out)
+
+    def warm(self, system, max_tokens=16):
+        """연결과 지시문 프롬프트 캐시를 미리 만든다(아주 짧은 요청 한 번)."""
+        request = self._quiz_request(system, [{"type": "text", "text": "준비"}], max_tokens)
+        if self.model in self.FALLBACK_MODELS:
+            response = self.client.beta.messages.create(**request, betas=self.BETAS, fallbacks="default")
+        else:
+            response = self.client.messages.create(**request)
+        usage = getattr(response, "usage", None)
+        return {"cache_read": getattr(usage, "cache_read_input_tokens", None),
+                "cache_write": getattr(usage, "cache_creation_input_tokens", None)}
+
     def complete_vision_json(self, system, text, image, max_tokens, trace_input):
         """이미지 한 장과 질문으로 JSON 하나를 받는다. 빠른 응답을 위해 effort low, 출력 상한 max_tokens."""
         if image is None:
@@ -248,6 +337,18 @@ class FakeLLM:
         text = self._reply(messages)
         tracing.record(None, model=self.model, input=messages, output=text)
         return text
+
+    def stream_quiz(self, system, text, image, max_tokens, trace_input):
+        """퀴즈 풀기 가짜 스트리밍. 그림이 있으면 SEEN, THINK 줄을 먼저 낸다."""
+        lines = ["SEEN: (가짜) 그림 글", "THINK: (가짜) 생각"] if image is not None else []
+        lines += ["ANSWER: " + ("1" if "[객관식]" in text else "가짜 답"), "REASON: 가짜 근거"]
+        out = "\n".join(lines) + "\n"
+        for i in range(0, len(out), 6):
+            yield out[i:i + 6]
+        tracing.record(None, model=self.model, input=trace_input, output=out)
+
+    def warm(self, system, max_tokens=16):
+        return {}
 
     def complete_vision_json(self, system, text, image, max_tokens, trace_input):
         """퀴즈 풀기 가짜 답. 객관식은 화면 번호 1, 단답은 '가짜 답'."""

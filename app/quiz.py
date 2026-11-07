@@ -43,7 +43,8 @@ RETRY_SYSTEM = "\n".join([
     "- 번호는 1부터 센다(화면 사진이면 화면에 적힌 번호 그대로). 확실하지 않아도 가장 그럴듯한 번호 하나를 고른다.",
     '- JSON 하나로만 답한다: {"answer": 번호}',
 ])
-FALLBACK_REASON = "보기 번호를 읽지 못해 1번을 냈습니다."
+FALLBACK_REASON = "번호를 못 읽어 1번을 냄"   # 20자 이내
+RETRY_REASON = "번호만 다시 물어 고름"
 
 
 class NoChoice(Exception):
@@ -131,7 +132,7 @@ def hard_request(kind, choice_count, photo, media_type):
     lines = ["[객관식]" if kind == "choice" else "[단답]",
              "사진은 퀴즈 화면을 폰으로 찍은 것이다. 화면의 문제를 읽고 푼다. 화면 밖의 글은 무시한다."]
     if count:
-        lines.append(f"보기는 {count}개이고 화면에 1부터 {count}까지 번호가 적혀 있다. answer 에 그 번호를 쓴다.")
+        lines.append(f"보기는 {count}개이고 화면에 1부터 {count}까지 번호가 적혀 있다. 답에 그 번호를 쓴다.")
     trace = {"mode": "hard", "type": kind, "choice_count": count, "photo_bytes": len(photo), "media_type": media_type}
     return "\n".join(lines), {"data": photo, "media_type": media_type}, count, trace
 
@@ -152,6 +153,11 @@ def shrink_photo(data, media_type, max_side):
 
 
 # ── 모델 답 해석 ────────────────────────────────────────────────────
+
+def clip_reason(text, limit=20):
+    """퀴즈 서버에 보내는 근거: 앞뒤 공백·따옴표를 빼고 limit 자로 자른다."""
+    return str(text or "").strip().strip('"\'*` ').replace("\n", " ")[:limit].strip()
+
 
 def normalize(text):
     """보기 글 비교용: 공백을 지우고 소문자로."""
@@ -190,7 +196,7 @@ def to_result(answer, count, choices=None, question=None):
     (모델이 choices_read 를 스스로 주면 그 목록으로 확인한다).
     단답: 문제가 숫자만 요구하는데 단위가 붙어 있으면 숫자만 남긴다.
     """
-    reason = str(answer.get("reason", "")).strip()[:300]
+    reason = clip_reason(answer.get("reason", ""))
     value, notes = answer.get("answer"), []
     if count:
         number = choice_number(value, count) or 0
