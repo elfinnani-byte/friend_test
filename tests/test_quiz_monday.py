@@ -726,3 +726,137 @@ def test_auto_results_have_timings(quiz_on, quiz_server, monkeypatch):
     assert set(out["timing"]) >= {"first_token", "submitted"}
     assert out["timings"] == quiz_flow.app_timings(out["timing"]) and set(out["timings"]) == {
         "first_token_ms", "submit_ms", "reason_ms"}
+
+
+# ── 사진 추측 답: VISIBLE 로 다시 찍기 ────────────────────────────────
+
+@pytest.mark.parametrize("text, expected", [
+    ("yes", (True, "")), ("YES", (True, "")), ("예", (True, "")),
+    ("no (표 아래 두 줄 잘림)", (False, "표 아래 두 줄 잘림")),
+    ("no - 그래프 아래쪽 잘림", (False, "그래프 아래쪽 잘림")),
+    ("아니오（격자 아랫줄）", (False, "격자 아랫줄")),
+    ("", (None, "")), ("모르겠다", (None, "")),
+])
+def test_parse_visible(text, expected):
+    assert quiz_flow.parse_visible(text) == expected
+
+
+def test_image_prompt_has_visible_between_seen_and_think():
+    s = quiz_flow.IMAGE_SYSTEM
+    assert s.index("SEEN:") < s.index("VISIBLE:") < s.index("THINK:") < s.index("ANSWER: 답") < s.index("REASON: 근거")
+    assert "일부라도 잘리거나 읽을 수 없으면 no" in s and "VISIBLE" not in quiz_flow.TEXT_SYSTEM
+
+
+CUT = ["SEEN: 표 위 두 줄\n", "VISIBLE: no (표 아래 두 줄 잘림)\n", "THINK: 보이는 것만 더한다\n", "ANSWER: 45000\n",
+       "REASON: 노트와 펜 합계\n"]
+
+
+def test_visible_no_stops_and_does_not_submit(quiz_on, quiz_server, capsys):
+    events = []
+    quiz_server["events"] = events
+    llm = StreamLLM(CUT, events)
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", **submit_fields()).json()
+    assert body["retake"] is True and body["missing"] == "표 아래 두 줄 잘림"
+    assert "text" not in body and "submitted" not in body and quiz_server["seen"] == []
+    assert [e[0] for e in events] == ["chunk", "chunk"]  # VISIBLE 줄에서 바로 멈춘다(THINK 이후는 읽지 않음)
+    assert {"visible", "first_token", "total"} <= set(body["timing"]) and "answer" not in body["timing"]
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert (line["visible"], line["retake"], line["submit"]) == ("no", True, False)
+
+
+def test_old_app_request_does_not_get_retake(quiz_on, quiz_server, capsys):
+    # 옛 앱은 supports_retake 를 보내지 않는다 → retake 를 모르므로 예전처럼 끝까지 풀어 제출한다
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    body = hard(type="short", **submit_fields()).json()
+    assert "retake" not in body and body["text"] == "45000" and body["submitted"] is True
+    assert quiz_server["seen"][0]["text"] == "45000"
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert line["visible"] == "no" and line["retake"] is False and line["supports_retake"] is False
+    assert "guessed_not_visible" in line["fixed"]
+
+
+def test_allow_guess_solves_and_submits_even_if_not_visible(quiz_on, quiz_server, capsys):
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", allow_guess="true", **submit_fields()).json()
+    assert body["text"] == "45000" and body["submitted"] is True and "retake" not in body
+    assert quiz_server["seen"][0]["text"] == "45000"
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert line["visible"] == "no" and "guessed_not_visible" in line["fixed"] and line["allow_guess"] is True
+
+
+def test_visible_yes_goes_on_as_before(quiz_on, quiz_server):
+    llm = StreamLLM(["SEEN: 표 전체\nVISIBLE: yes\nTHINK: 다 더한다\nANSWER: 79000\nREASON: 품목별 금액 합계\n"])
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", **submit_fields()).json()
+    assert body["text"] == "79000" and body["submitted"] is True
+
+
+def test_easy_image_is_not_gated(quiz_on, quiz_server):
+    # 이지모드 그림은 다시 찍을 사진이 없으므로 VISIBLE: no 여도 끝까지 풀어 낸다
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    body = easy(type="short", question="합계는?", image_url="https://example.com/t.png", **submit_fields()).json()
+    assert body["text"] == "45000" and body["submitted"] is True
+
+
+def test_missing_visible_line_is_treated_as_before(quiz_on):
+    llm = StreamLLM(["SEEN: s\nTHINK: t\nANSWER: 3\nREASON: r\n"])  # VISIBLE 을 빠뜨린 모델
+    use(llm, llm)
+    assert hard(type="choice", choice_count=4, supports_retake="true").json()["choice"] == 2
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"eval": "after"}, {"supports_retake": False, "allow_guess": False, "eval": "after"}),
+    ({"allow_guess": "true", "eval": "before"}, {"supports_retake": False, "allow_guess": True, "eval": "before"}),
+    ({"allow_guess": "1"}, {"supports_retake": False, "allow_guess": True, "eval": None}),
+    ({"supports_retake": "true"}, {"supports_retake": True, "allow_guess": False, "eval": None}),
+    ({"supports_retake": "false"}, {"supports_retake": False, "allow_guess": False, "eval": None}),
+    ({"eval": "나쁜 값 <script>"}, {"supports_retake": False, "allow_guess": False, "eval": None}),
+    ({}, {"supports_retake": False, "allow_guess": False, "eval": None}),
+])
+def test_solve_options(fields, expected):
+    assert quiz.solve_options(fields) == expected
+
+
+def test_langfuse_metadata_has_eval_visible_retake(quiz_on, monkeypatch):
+    import uuid
+
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app import tracing
+    exporter = InMemorySpanExporter()
+    key = uuid.uuid4().hex
+    monkeypatch.setattr(tracing, "_client", Langfuse(public_key=f"pk-lf-{key}", secret_key=f"sk-lf-{key}",
+                                                     base_url="http://localhost:1", span_exporter=exporter))
+    monkeypatch.setattr(tracing, "_enabled", True)
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    hard(type="short", eval="after", supports_retake="true")
+    tracing.client().flush()
+    span = next(s for s in exporter.get_finished_spans() if s.name == "quiz-solve")
+    attrs = span.attributes
+    assert json.loads(attrs["langfuse.observation.metadata.eval"]) == "after"
+    assert json.loads(attrs["langfuse.observation.metadata.visible"]) == "no"
+    assert json.loads(attrs["langfuse.observation.metadata.retake"]) is True
+
+
+def test_quiz_eval_counts_retake(tmp_path):
+    quiz_eval = load_eval()
+    (tmp_path / "shot.png").write_bytes(PNG)
+    items = [{"id": "c1", "mode": "hard", "type": "short", "image": "shot.png", "answer": "79000", "label": "problem",
+              "problem": "cut"}]
+    sent = []
+
+    def post(url, json=None, files=None, data=None):
+        sent.append(data)
+        return httpx.Response(200, json={"retake": True, "missing": "표 아래 잘림", "timing": {"first_token": 900, "visible": 1500}})
+
+    rows = quiz_eval.run_remote(items, tmp_path, "https://eval---svc.a.run.app", post=post, eval_tag="after",
+                                supports_retake=True)
+    assert sent[0]["eval"] == "after" and sent[0]["supports_retake"] == "true" and "allow_guess" not in sent[0]
+    assert rows[0]["retake"] is True and rows[0]["ok"] is False and rows[0]["missing"] == "표 아래 잘림"
+    assert "다시 찍기" in quiz_eval.table(rows) and "다시 찍기 1번" in quiz_eval.summary(rows)

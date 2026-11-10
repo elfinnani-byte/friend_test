@@ -1,8 +1,10 @@
 """퀴즈 한 문제 풀기 흐름(스트리밍). /api/quiz/solve, 서버 직접 풀기(auto), 시험지 스크립트가 함께 쓴다.
 
 - 글 문제(그림 없음): QUIZ_MODEL_TEXT 로 "ANSWER: …" → "REASON: …" 두 줄을 받는다.
-- 그림 문제(이지모드 그림, 하드모드 사진): QUIZ_MODEL 로 "SEEN" → "THINK" → "ANSWER" → "REASON" 을 받는다.
-  SEEN, THINK 는 퀴즈 서버에 보내지 않고 로그에만 남긴다.
+- 그림 문제(이지모드 그림, 하드모드 사진): QUIZ_MODEL 로 "SEEN" → "VISIBLE" → "THINK" → "ANSWER" → "REASON" 을 받는다.
+  SEEN, VISIBLE, THINK 는 퀴즈 서버에 보내지 않고 로그에만 남긴다.
+- 하드모드 사진에서 VISIBLE: no(답에 필요한 그림·표·보기가 잘리거나 읽을 수 없음)면 그 자리에서 멈추고 제출하지 않는다.
+  응답은 {"retake": true, "missing": "안 보이는 부분"} — 앱이 다시 찍어 allow_guess=true 로 보내면 끝까지 풀어 제출한다.
 - REASON 줄이 끝나는 즉시(줄바꿈이 없으면 근거가 20자에 닿는 순간) 답과 근거를 /api/answer 에 한 번 제출한다.
   퀴즈 서버에는 근거만 따로 받는 엔드포인트가 없고, 같은 문제에 두 번 내면 409 라서 한 번에 낸다.
 - 객관식 번호를 못 읽으면 번호만 한 번 더 묻고, 그래도 없으면 1번을 낸다(답을 안 내면 0점).
@@ -34,17 +36,20 @@ TEXT_SYSTEM = "\n".join([
 ])
 IMAGE_SYSTEM = "\n".join([
     "너는 퀴즈 대결에서 문제를 푸는 선수다. 그림(또는 퀴즈 화면 사진)을 보고 정답 하나를 고른다.",
-    "아래 네 항목을 이 순서로 출력한다.",
+    "아래 다섯 항목을 이 순서로 출력한다.",
     "SEEN: 그림 속 문제 글, 보기, 코드, 숫자를 보이는 그대로 옮겨 적는다. 여러 줄이어도 된다.",
+    "VISIBLE: 답을 구하는 데 필요한 그림·표·보기가 사진에 모두 보이면 yes, 일부라도 잘리거나 읽을 수 없으면 no",
     "THINK: 두세 줄로 생각한다.",
     "ANSWER: 답",
     "REASON: 근거",
     "- SEEN 은 해석하지 말고 보이는 글자를 그대로 옮긴다. 코드는 줄바꿈과 들여쓰기를 지킨다.",
+    "- VISIBLE 은 yes 또는 no 한 단어로 쓰고, no 이면 괄호 안에 안 보이는 부분을 짧게 쓴다. 예: VISIBLE: no (표 아래 두 줄 잘림)",
+    "- 안 보이는 부분을 짐작해서 채우지 않는다. 보이는 것만으로 답이 정해지지 않으면 no 다.",
     *_COMMON,
 ])
 
-KEYS = ("SEEN", "THINK", "ANSWER", "REASON")
-_KEY_LINE = re.compile(r"^[\s*#>_`-]*(SEEN|THINK|ANSWER|REASON)[\s*_`]*[:：][\s*_`]*(.*)$", re.IGNORECASE)
+KEYS = ("SEEN", "VISIBLE", "THINK", "ANSWER", "REASON")
+_KEY_LINE = re.compile(r"^[\s*#>_`-]*(SEEN|VISIBLE|THINK|ANSWER|REASON)[\s*_`]*[:：][\s*_`]*(.*)$", re.IGNORECASE)
 
 
 class QuizLines:
@@ -53,6 +58,7 @@ class QuizLines:
     def __init__(self, reason_limit=QUIZ_REASON_MAX):
         self.buffer, self.current = "", None
         self.sections = {k: [] for k in KEYS}
+        self.visible_done = False       # VISIBLE 줄이 줄바꿈으로 끝났다
         self.answer_done = False        # ANSWER 줄이 줄바꿈으로 끝났다
         self.reason_cut = False         # 근거가 상한에 닿아 줄이 끝나기 전에 잘랐다
         self.reason_done = False        # REASON 이 줄바꿈으로 끝났거나 글자 수 상한에 닿았다
@@ -67,6 +73,8 @@ class QuizLines:
         if self.current is None:
             return  # 첫 항목 이름이 나오기 전의 글은 버린다
         self.sections[self.current].append(line)
+        if self.current == "VISIBLE" and self.text("VISIBLE"):
+            self.visible_done = True
         if self.current == "ANSWER" and self.text("ANSWER"):
             self.answer_done = True
         if self.current == "REASON" and self.text("REASON"):
@@ -102,6 +110,23 @@ def clean(text):
     return str(text).strip().strip('"\'*` ').strip()
 
 
+_MISSING = re.compile(r"[(（]\s*(.+?)\s*[)）]")
+
+
+def parse_visible(text):
+    """VISIBLE 값 읽기. (True/False/None, 안 보이는 부분). "no (표 아래 잘림)", "no - 표 아래 잘림", "아니오" 모두 no."""
+    value = clean(text or "")
+    word = re.match(r"[A-Za-z가-힣]+", value)  # 첫 단어(뒤에 괄호가 붙어 있어도 떼어 읽는다)
+    head = word.group(0).lower() if word else ""
+    if head in ("yes", "y", "예", "네", "true"):
+        return True, ""
+    if head in ("no", "n", "아니오", "아니요", "false"):
+        found = _MISSING.search(value)
+        rest = found.group(1) if found else value[len(head):].strip(" -:—()")
+        return False, quiz.clip_reason(rest, 40)
+    return None, ""
+
+
 def pick_models(image, image_model, text_model):
     """그림이 있으면 그림 모델, 없으면 글 모델(없으면 그림 모델)."""
     return image_model if image is not None or text_model is None else text_model
@@ -118,25 +143,35 @@ def elapsed_ms(started):
     return round((time.perf_counter() - started) * 1000)
 
 
-def solve(model, text, image, count, trace, *, choices=None, question=None, submit=None, started=None):
-    """한 문제를 풀고(필요하면 제출까지) {"result", "notes", "timing", "seen", "think", "submission"} 을 돌려준다.
+def solve(model, text, image, count, trace, *, choices=None, question=None, submit=None, started=None,
+          gate_visible=False, eval_tag=None):
+    """한 문제를 풀고(필요하면 제출까지) {"result", "notes", "timing", "seen", "think", "submission",
+    "visible", "retake"} 을 돌려준다.
 
     submit(answer_part, reason) 은 제출 함수(없으면 제출하지 않는다). 객관식은 번호를 못 읽어도 반드시 답을 만든다.
-    단답을 끝내 못 만들면 QuizError(502).
+    gate_visible=True(하드모드 사진, allow_guess 아님)면 VISIBLE: no 에서 멈추고 제출하지 않는다(result 는 retake).
+    eval_tag 는 Langfuse metadata 의 eval 로 남긴다(측정 구분용). 단답을 끝내 못 만들면 QuizError(502).
     """
     started = started or time.perf_counter()
     timing, notes = {}, []
     system = IMAGE_SYSTEM if image is not None else TEXT_SYSTEM
     limit = QUIZ_MAX_TOKENS_IMAGE if image is not None else QUIZ_MAX_TOKENS_TEXT
     lines = QuizLines()
-    error = None
-    with tracing.observe("quiz-solve", "generation", model=model.model, input=trace,
-                         metadata={"mode": trace["mode"], "type": trace["type"], "image": image is not None}):
+    error, retake, visible, missing = None, False, None, ""
+    meta = {"mode": trace["mode"], "type": trace["type"], "image": image is not None,
+            **({"eval": eval_tag} if eval_tag else {})}
+    with tracing.observe("quiz-solve", "generation", model=model.model, input=trace, metadata=meta) as observation:
         stream = model.stream_quiz(system, text, image, limit, trace)
         try:
             for chunk in stream:
                 timing.setdefault("first_token", elapsed_ms(started))
                 lines.feed(chunk)
+                if lines.visible_done and "visible" not in timing:
+                    timing["visible"] = elapsed_ms(started)
+                    visible, missing = parse_visible(lines.text("VISIBLE"))
+                    if visible is False and gate_visible:
+                        retake = True
+                        break  # 답에 필요한 부분이 안 보인다 → 짐작하지 않고 멈춘다(제출하지 않음)
                 if lines.answer_done and "answer" not in timing:
                     timing["answer"] = elapsed_ms(started)
                     if count and _choice(lines.text("ANSWER"), count, choices)[0] is None:
@@ -151,6 +186,15 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
             log("WARNING", "퀴즈 스트림 실패", mode=trace["mode"], error=type(exc).__name__)
         finally:
             stream.close()
+        if visible is None and lines.text("VISIBLE"):
+            visible, missing = parse_visible(lines.text("VISIBLE"))
+        observation.update(metadata={**meta, "visible": {True: "yes", False: "no"}.get(visible), "retake": retake})
+    if retake:
+        timing["total"] = elapsed_ms(started)
+        log("INFO", "퀴즈 다시 찍기", mode=trace["mode"], missing=missing)
+        return {"result": {"retake": True, "missing": missing or "답에 필요한 부분이 안 보임"}, "notes": ["retake"],
+                "timing": timing, "seen": lines.text("SEEN"), "think": "", "submission": None,
+                "answer_raw": "", "visible": "no", "retake": True}
     timing.setdefault("answer", elapsed_ms(started))
     answer, reason = lines.text("ANSWER"), quiz.clip_reason(lines.text("REASON"), QUIZ_REASON_MAX)
     if lines.reason_cut or len(lines.text("REASON")) > QUIZ_REASON_MAX:
@@ -172,8 +216,12 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
         text_answer, short_notes = quiz.short_answer(answer, question or lines.text("SEEN"))
         result = {"text": text_answer, "reason": reason}
         notes += short_notes
+    if visible is False:
+        notes.append("guessed_not_visible")  # allow_guess 나 이지모드라 안 보여도 풀었다
     done = _finish(result, notes, timing, lines.text("SEEN"), lines.text("THINK"), submit, started)
     done["answer_raw"] = answer[:100]  # 로그용: 모델이 쓴 ANSWER 줄 그대로
+    done["visible"] = {True: "yes", False: "no"}.get(visible)
+    done["retake"] = False
     return done
 
 

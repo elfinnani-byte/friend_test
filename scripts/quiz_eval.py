@@ -84,19 +84,25 @@ def run(items, folder, image_model, text_model, repeat=1):
     return rows
 
 
-def remote_request(item, folder):
-    """시험지 항목을 풀이 서버 요청 하나로 바꾼다. (json 또는 None, files 또는 None, data 또는 None)"""
+def remote_request(item, folder, eval_tag=None, allow_guess=False, supports_retake=False):
+    """시험지 항목을 풀이 서버 요청 하나로 바꾼다. (json 또는 None, files 또는 None, data 또는 None)
+    eval_tag 는 Langfuse metadata 의 eval 로, allow_guess 는 안 보여도 끝까지 풀게 하는 옵션으로,
+    supports_retake 는 다시 찍기 응답을 받겠다는 표시로 보낸다."""
+    extra = {**({"eval": eval_tag} if eval_tag else {}), **({"allow_guess": "true"} if allow_guess else {}),
+             **({"supports_retake": "true"} if supports_retake else {})}
     if item["mode"] == "hard":
         path = folder / item["image"]
         kind = mimetypes.guess_type(item["image"])[0] or "image/png"
-        data = {"type": item["type"], **({"choice_count": str(item["choice_count"])} if item.get("choice_count") else {})}
+        data = {"type": item["type"], **({"choice_count": str(item["choice_count"])} if item.get("choice_count") else {}),
+                **extra}
         return None, {"photo": (path.name, path.read_bytes(), kind)}, data
     if item.get("image"):
         raise SystemExit(f"{item['id']}: 이지모드 그림 문제는 --server 로 잴 수 없습니다(그림 주소가 필요).")
-    return {"type": item["type"], "question": item["question"], "choices": item.get("choices")}, None, None
+    return {"type": item["type"], "question": item["question"], "choices": item.get("choices"), **extra}, None, None
 
 
-def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time.sleep):
+def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time.sleep, eval_tag=None, allow_guess=False,
+               supports_retake=False):
     """풀이 서버를 불러 같은 문제를 repeat 번씩 푼다. 분당 요청 제한(429)이면 1분 기다렸다가 한 번 더 보낸다."""
     import httpx
     url = server.rstrip("/") + "/api/quiz/solve"
@@ -104,7 +110,7 @@ def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time
     rows = []
     for item in items:
         for n in range(repeat):
-            body, files, data = remote_request(item, folder)
+            body, files, data = remote_request(item, folder, eval_tag, allow_guess, supports_retake)
             started = time.perf_counter()
             for attempt in range(2):
                 r = post(url, json=body) if body is not None else post(url, files=files, data=data)
@@ -115,10 +121,13 @@ def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time
             elapsed = round((time.perf_counter() - started) * 1000)
             result = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
             ok_status = r.status_code == 200
+            retake = ok_status and result.get("retake") is True  # 풀이 서버가 다시 찍기를 알렸다(답 없음, 제출 안 함)
             rows.append({"id": item["id"], "try": n + 1, "mode": item["mode"], "type": item["type"],
+                         "label": item.get("label"), "problem": item.get("problem"),
+                         "retake": retake, "missing": result.get("missing") if retake else None,
                          "model": server.split("//")[-1].split("---")[0] if "---" in server else "server",
                          "expected": item["answer"], "got": result.get("choice", result.get("text")),
-                         "ok": ok_status and correct(item, result), "reason": result.get("reason", ""),
+                         "ok": ok_status and not retake and correct(item, result), "reason": result.get("reason", ""),
                          "timing": {**(result.get("timing") or {}), "round_trip": elapsed},
                          "notes": [], "error": None if ok_status else f"HTTP {r.status_code}"})
             if pause:
@@ -132,7 +141,7 @@ def table(rows):
     sec = lambda ms: f"{ms / 1000:.2f}초" if isinstance(ms, (int, float)) else "-"
     for r in rows:
         t = r["timing"]
-        got = r["error"] or r["got"]
+        got = r["error"] or ("다시 찍기: " + (r.get("missing") or "") if r.get("retake") else r["got"])
         lines.append(f"| {r['id']} | {r['try']} | {r['mode']} | {r['model']} | {r['expected']} | {got} | "
                      f"{'O' if r['ok'] else 'X'} | {sec(t.get('first_token'))} | {sec(t.get('answer'))} | "
                      f"{sec(t.get('total'))} | {sec(t.get('round_trip'))} | {r['reason']} |")
@@ -148,6 +157,9 @@ def summary(rows):
     out = [f"정답률 {sum(r['ok'] for r in rows)}/{len(rows)} ({100 * sum(r['ok'] for r in rows) / len(rows):.0f}%), "
            f"평균 첫 토큰 {sum(first) / max(1, len(first)) / 1000:.2f}초, "
            f"평균 답 확정 {sum(answer) / max(1, len(answer)) / 1000:.2f}초, 평균 전체 {sum(total) / max(1, len(total)) / 1000:.2f}초"]
+    retakes = sum(1 for r in rows if r.get("retake"))
+    if retakes:
+        out.append(f"- 다시 찍기 {retakes}번(정답 수에 넣지 않음)")
     for mode in sorted({r["mode"] for r in rows}):
         part = [r for r in rows if r["mode"] == mode]
         out.append(f"- {mode}: 정답 {sum(r['ok'] for r in part)}/{len(part)}, "
@@ -164,12 +176,17 @@ def main(argv=None):
     parser.add_argument("--text-model")
     parser.add_argument("--server", help="이 풀이 서버의 /api/quiz/solve 로 잰다(제출 정보는 보내지 않음)")
     parser.add_argument("--pause", type=float, default=0.0, help="--server 일 때 요청 사이 쉬는 초(분당 제한 대비)")
+    parser.add_argument("--eval", dest="eval_tag", help="--server 요청에 붙일 측정 표시(Langfuse metadata eval)")
+    parser.add_argument("--allow-guess", action="store_true", help="--server 요청에 allow_guess=true(안 보여도 끝까지 풀기)")
+    parser.add_argument("--supports-retake", action="store_true",
+                        help="--server 요청에 supports_retake=true(안 보이면 다시 찍기 응답을 받음)")
     args = parser.parse_args(argv)
 
     if args.server:
         items = load_items(args.dir, args.only)
         print(f"[풀이 서버 {args.server}, {len(items)}문제 x {args.repeat}회, 퀴즈 서버에는 제출하지 않음]")
-        rows = run_remote(items, args.dir, args.server, args.repeat, args.pause)
+        rows = run_remote(items, args.dir, args.server, args.repeat, args.pause, eval_tag=args.eval_tag,
+                          allow_guess=args.allow_guess, supports_retake=args.supports_retake)
         print(table(rows))
         print()
         print(summary(rows))

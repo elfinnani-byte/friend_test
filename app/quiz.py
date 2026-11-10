@@ -168,6 +168,19 @@ def short_answer(text, question=None):
     return text, notes
 
 
+_EVAL_TAG = re.compile(r"^[A-Za-z0-9_.=-]{1,40}$")
+
+
+def solve_options(fields):
+    """풀이 옵션.
+    supports_retake: 앱이 다시 찍기 응답을 알아듣는다(없으면 옛 앱이므로 안 보여도 끝까지 풀어 제출).
+    allow_guess: 안 보여도 끝까지 풀어 제출(다시 찍은 두 번째 사진용). eval: 측정 구분 표시(Langfuse metadata)."""
+    flag = lambda name: str(fields.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
+    tag = str(fields.get("eval") or "").strip()
+    return {"supports_retake": flag("supports_retake"), "allow_guess": flag("allow_guess"),
+            "eval": tag if _EVAL_TAG.match(tag) else None}
+
+
 # ── 퀴즈 서버에 답 바로 제출 ────────────────────────────────────────
 # quiz_server, token, question_id 셋이 함께 오면 답을 정한 뒤 서버가 {quiz_server}/api/answer 로 제출한다.
 # 셋 다 없으면 예전처럼 답만 돌려준다(첫 APK 호환). 팀 토큰은 로그, Langfuse, 응답 어디에도 남기지 않는다.
