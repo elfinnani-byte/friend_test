@@ -84,10 +84,12 @@ def run(items, folder, image_model, text_model, repeat=1):
     return rows
 
 
-def remote_request(item, folder, eval_tag=None, allow_guess=False):
+def remote_request(item, folder, eval_tag=None, allow_guess=False, supports_retake=False):
     """시험지 항목을 풀이 서버 요청 하나로 바꾼다. (json 또는 None, files 또는 None, data 또는 None)
-    eval_tag 는 Langfuse metadata 의 eval 로, allow_guess 는 안 보여도 끝까지 풀게 하는 옵션으로 보낸다."""
-    extra = {**({"eval": eval_tag} if eval_tag else {}), **({"allow_guess": "true"} if allow_guess else {})}
+    eval_tag 는 Langfuse metadata 의 eval 로, allow_guess 는 안 보여도 끝까지 풀게 하는 옵션으로,
+    supports_retake 는 다시 찍기 응답을 받겠다는 표시로 보낸다."""
+    extra = {**({"eval": eval_tag} if eval_tag else {}), **({"allow_guess": "true"} if allow_guess else {}),
+             **({"supports_retake": "true"} if supports_retake else {})}
     if item["mode"] == "hard":
         path = folder / item["image"]
         kind = mimetypes.guess_type(item["image"])[0] or "image/png"
@@ -99,7 +101,8 @@ def remote_request(item, folder, eval_tag=None, allow_guess=False):
     return {"type": item["type"], "question": item["question"], "choices": item.get("choices"), **extra}, None, None
 
 
-def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time.sleep, eval_tag=None, allow_guess=False):
+def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time.sleep, eval_tag=None, allow_guess=False,
+               supports_retake=False):
     """풀이 서버를 불러 같은 문제를 repeat 번씩 푼다. 분당 요청 제한(429)이면 1분 기다렸다가 한 번 더 보낸다."""
     import httpx
     url = server.rstrip("/") + "/api/quiz/solve"
@@ -107,7 +110,7 @@ def run_remote(items, folder, server, repeat=1, pause=0.0, post=None, sleep=time
     rows = []
     for item in items:
         for n in range(repeat):
-            body, files, data = remote_request(item, folder, eval_tag, allow_guess)
+            body, files, data = remote_request(item, folder, eval_tag, allow_guess, supports_retake)
             started = time.perf_counter()
             for attempt in range(2):
                 r = post(url, json=body) if body is not None else post(url, files=files, data=data)
@@ -175,13 +178,15 @@ def main(argv=None):
     parser.add_argument("--pause", type=float, default=0.0, help="--server 일 때 요청 사이 쉬는 초(분당 제한 대비)")
     parser.add_argument("--eval", dest="eval_tag", help="--server 요청에 붙일 측정 표시(Langfuse metadata eval)")
     parser.add_argument("--allow-guess", action="store_true", help="--server 요청에 allow_guess=true(안 보여도 끝까지 풀기)")
+    parser.add_argument("--supports-retake", action="store_true",
+                        help="--server 요청에 supports_retake=true(안 보이면 다시 찍기 응답을 받음)")
     args = parser.parse_args(argv)
 
     if args.server:
         items = load_items(args.dir, args.only)
         print(f"[풀이 서버 {args.server}, {len(items)}문제 x {args.repeat}회, 퀴즈 서버에는 제출하지 않음]")
         rows = run_remote(items, args.dir, args.server, args.repeat, args.pause, eval_tag=args.eval_tag,
-                          allow_guess=args.allow_guess)
+                          allow_guess=args.allow_guess, supports_retake=args.supports_retake)
         print(table(rows))
         print()
         print(summary(rows))

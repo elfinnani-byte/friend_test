@@ -756,7 +756,7 @@ def test_visible_no_stops_and_does_not_submit(quiz_on, quiz_server, capsys):
     quiz_server["events"] = events
     llm = StreamLLM(CUT, events)
     use(llm, llm)
-    body = hard(type="short", **submit_fields()).json()
+    body = hard(type="short", supports_retake="true", **submit_fields()).json()
     assert body["retake"] is True and body["missing"] == "표 아래 두 줄 잘림"
     assert "text" not in body and "submitted" not in body and quiz_server["seen"] == []
     assert [e[0] for e in events] == ["chunk", "chunk"]  # VISIBLE 줄에서 바로 멈춘다(THINK 이후는 읽지 않음)
@@ -765,10 +765,22 @@ def test_visible_no_stops_and_does_not_submit(quiz_on, quiz_server, capsys):
     assert (line["visible"], line["retake"], line["submit"]) == ("no", True, False)
 
 
+def test_old_app_request_does_not_get_retake(quiz_on, quiz_server, capsys):
+    # 옛 앱은 supports_retake 를 보내지 않는다 → retake 를 모르므로 예전처럼 끝까지 풀어 제출한다
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    body = hard(type="short", **submit_fields()).json()
+    assert "retake" not in body and body["text"] == "45000" and body["submitted"] is True
+    assert quiz_server["seen"][0]["text"] == "45000"
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert line["visible"] == "no" and line["retake"] is False and line["supports_retake"] is False
+    assert "guessed_not_visible" in line["fixed"]
+
+
 def test_allow_guess_solves_and_submits_even_if_not_visible(quiz_on, quiz_server, capsys):
     llm = StreamLLM(CUT)
     use(llm, llm)
-    body = hard(type="short", allow_guess="true", **submit_fields()).json()
+    body = hard(type="short", supports_retake="true", allow_guess="true", **submit_fields()).json()
     assert body["text"] == "45000" and body["submitted"] is True and "retake" not in body
     assert quiz_server["seen"][0]["text"] == "45000"
     line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
@@ -778,7 +790,7 @@ def test_allow_guess_solves_and_submits_even_if_not_visible(quiz_on, quiz_server
 def test_visible_yes_goes_on_as_before(quiz_on, quiz_server):
     llm = StreamLLM(["SEEN: 표 전체\nVISIBLE: yes\nTHINK: 다 더한다\nANSWER: 79000\nREASON: 품목별 금액 합계\n"])
     use(llm, llm)
-    body = hard(type="short", **submit_fields()).json()
+    body = hard(type="short", supports_retake="true", **submit_fields()).json()
     assert body["text"] == "79000" and body["submitted"] is True
 
 
@@ -793,15 +805,17 @@ def test_easy_image_is_not_gated(quiz_on, quiz_server):
 def test_missing_visible_line_is_treated_as_before(quiz_on):
     llm = StreamLLM(["SEEN: s\nTHINK: t\nANSWER: 3\nREASON: r\n"])  # VISIBLE 을 빠뜨린 모델
     use(llm, llm)
-    assert hard(type="choice", choice_count=4).json()["choice"] == 2
+    assert hard(type="choice", choice_count=4, supports_retake="true").json()["choice"] == 2
 
 
 @pytest.mark.parametrize("fields, expected", [
-    ({"eval": "after"}, {"allow_guess": False, "eval": "after"}),
-    ({"allow_guess": "true", "eval": "before"}, {"allow_guess": True, "eval": "before"}),
-    ({"allow_guess": "1"}, {"allow_guess": True, "eval": None}),
-    ({"eval": "나쁜 값 <script>"}, {"allow_guess": False, "eval": None}),
-    ({}, {"allow_guess": False, "eval": None}),
+    ({"eval": "after"}, {"supports_retake": False, "allow_guess": False, "eval": "after"}),
+    ({"allow_guess": "true", "eval": "before"}, {"supports_retake": False, "allow_guess": True, "eval": "before"}),
+    ({"allow_guess": "1"}, {"supports_retake": False, "allow_guess": True, "eval": None}),
+    ({"supports_retake": "true"}, {"supports_retake": True, "allow_guess": False, "eval": None}),
+    ({"supports_retake": "false"}, {"supports_retake": False, "allow_guess": False, "eval": None}),
+    ({"eval": "나쁜 값 <script>"}, {"supports_retake": False, "allow_guess": False, "eval": None}),
+    ({}, {"supports_retake": False, "allow_guess": False, "eval": None}),
 ])
 def test_solve_options(fields, expected):
     assert quiz.solve_options(fields) == expected
@@ -821,7 +835,7 @@ def test_langfuse_metadata_has_eval_visible_retake(quiz_on, monkeypatch):
     monkeypatch.setattr(tracing, "_enabled", True)
     llm = StreamLLM(CUT)
     use(llm, llm)
-    hard(type="short", eval="after")
+    hard(type="short", eval="after", supports_retake="true")
     tracing.client().flush()
     span = next(s for s in exporter.get_finished_spans() if s.name == "quiz-solve")
     attrs = span.attributes
@@ -841,7 +855,8 @@ def test_quiz_eval_counts_retake(tmp_path):
         sent.append(data)
         return httpx.Response(200, json={"retake": True, "missing": "표 아래 잘림", "timing": {"first_token": 900, "visible": 1500}})
 
-    rows = quiz_eval.run_remote(items, tmp_path, "https://eval---svc.a.run.app", post=post, eval_tag="after")
-    assert sent[0]["eval"] == "after" and "allow_guess" not in sent[0]
+    rows = quiz_eval.run_remote(items, tmp_path, "https://eval---svc.a.run.app", post=post, eval_tag="after",
+                                supports_retake=True)
+    assert sent[0]["eval"] == "after" and sent[0]["supports_retake"] == "true" and "allow_guess" not in sent[0]
     assert rows[0]["retake"] is True and rows[0]["ok"] is False and rows[0]["missing"] == "표 아래 잘림"
     assert "다시 찍기" in quiz_eval.table(rows) and "다시 찍기 1번" in quiz_eval.summary(rows)

@@ -172,10 +172,13 @@ _EVAL_TAG = re.compile(r"^[A-Za-z0-9_.=-]{1,40}$")
 
 
 def solve_options(fields):
-    """풀이 옵션. allow_guess: 안 보여도 끝까지 풀어 제출(다시 찍은 두 번째 사진용). eval: 측정 구분 표시(Langfuse metadata)."""
-    guess = str(fields.get("allow_guess", "")).strip().lower() in ("1", "true", "yes", "on")
+    """풀이 옵션.
+    supports_retake: 앱이 다시 찍기 응답을 알아듣는다(없으면 옛 앱이므로 안 보여도 끝까지 풀어 제출).
+    allow_guess: 안 보여도 끝까지 풀어 제출(다시 찍은 두 번째 사진용). eval: 측정 구분 표시(Langfuse metadata)."""
+    flag = lambda name: str(fields.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
     tag = str(fields.get("eval") or "").strip()
-    return {"allow_guess": guess, "eval": tag if _EVAL_TAG.match(tag) else None}
+    return {"supports_retake": flag("supports_retake"), "allow_guess": flag("allow_guess"),
+            "eval": tag if _EVAL_TAG.match(tag) else None}
 
 
 # ── 퀴즈 서버에 답 바로 제출 ────────────────────────────────────────
