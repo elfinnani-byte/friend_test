@@ -345,7 +345,7 @@ def auto_solver(image_model, text_model):
         full_url = image_url if not image_url or image_url.startswith("http") else f"{base}/{image_url.lstrip('/')}"
         text, image, count, trace = quiz.easy_request({"type": question.get("type"), "question": question.get("text"),
                                                        "choices": question.get("choices"), "image_url": full_url})
-        if full_url and full_url.startswith(base):
+        if quiz.same_server(full_url, base):  # 호스트가 퀴즈 서버와 정확히 같을 때만 토큰을 붙인다
             # 퀴즈 서버 그림은 토큰이 필요할 수 있어, 서버가 받아 바이트로 넘긴다(받지 못하면 주소 그대로)
             try:
                 r = quiz_auto_manager.http.get(full_url, headers={"Authorization": f"Bearer {token}"})
