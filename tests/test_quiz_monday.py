@@ -916,6 +916,41 @@ def test_quiz_eval_counts_retake(tmp_path):
     assert "다시 찍기" in quiz_eval.table(rows) and "다시 찍기 1번" in quiz_eval.summary(rows)
 
 
+# ── 서버 직접 풀기: 그림 주소의 호스트가 퀴즈 서버와 같을 때만 팀 토큰을 붙인다 ──────────
+
+@pytest.mark.parametrize("url, same", [
+    (QUIZ_SERVER + "/img/1.png", True),
+    (QUIZ_SERVER, True),
+    (QUIZ_SERVER + ":443/img/1.png", True),
+    (QUIZ_SERVER + ".evil.example/x.png", False),         # 앞부분만 같은 다른 호스트
+    (QUIZ_SERVER.replace("https://", "https://user@") + "/x.png", False),
+    (QUIZ_SERVER + ":8443/x.png", False),
+    (QUIZ_SERVER.replace("https://", "http://") + "/x.png", False),
+    ("https://evil.example/x.png", False),
+    ("", False), (None, False),
+])
+def test_same_server(url, same):
+    assert quiz.same_server(url, QUIZ_SERVER) is same
+
+
+def test_auto_image_from_other_host_gets_no_token(quiz_on, monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.host, request.headers.get("authorization")))
+        return httpx.Response(200, headers={"content-type": "image/png"}, content=PNG)
+
+    monkeypatch.setattr(main, "quiz_auto_manager", quiz_auto.AutoManager(http=httpx.Client(
+        transport=httpx.MockTransport(handler))))
+    llm = StreamLLM(["SEEN: s\nVISIBLE: yes\nTHINK: t\nANSWER: 1\nREASON: r\n"])
+    solve = main.auto_solver(llm, llm)
+    monkeypatch.setattr(main, "make_submit", lambda target: None)
+    solve(QUIZ_SERVER, TEAM_TOKEN, {"id": "q1", "type": "short", "text": "?",
+                                    "image_url": QUIZ_SERVER + ".evil.example/x.png"})
+    assert seen == []  # 다른 호스트에는 아예 요청하지 않는다(토큰도 보내지 않음)
+    solve(QUIZ_SERVER, TEAM_TOKEN, {"id": "q2", "type": "short", "text": "?", "image_url": "/img/1.png"})
+    assert seen and seen[-1][1] == f"Bearer {TEAM_TOKEN}"  # 같은 퀴즈 서버 그림은 예전처럼 토큰으로 받는다
+
 # ── QUIZ_VISIBLE_CHECK 와 Langfuse version(배포 뒤 트레이스를 version 으로 나눠 보기) ──────────
 
 def langfuse_spans(monkeypatch):

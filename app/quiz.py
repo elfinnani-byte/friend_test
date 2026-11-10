@@ -232,6 +232,20 @@ def allowed_server(url, allowlist):
     return None
 
 
+def same_server(url, base):
+    """url 이 퀴즈 서버(base: 'https://호스트')와 같은 https 호스트인지. 토큰을 붙여 받아도 되는지 본다.
+    'https://퀴즈서버.run.app.evil.example/x.png' 처럼 앞부분만 같은 주소, 사용자 정보·다른 포트는 아니다."""
+    if not isinstance(url, str) or not isinstance(base, str):
+        return False
+    try:
+        u, b = urlsplit(url.strip()), urlsplit(base)
+        port = u.port
+    except ValueError:
+        return False
+    return (u.scheme == "https" and b.scheme == "https" and bool(u.hostname) and u.hostname == b.hostname
+            and not u.username and not u.password and port in (None, 443))
+
+
 def submit_target(fields, allowlist):
     """요청의 제출 정보를 검사한다. 셋 다 없으면 None, 일부만 있거나 주소가 허용되지 않으면 QuizError(400)."""
     given = {k: fields.get(k) for k in SUBMIT_FIELDS if fields.get(k) not in (None, "")}
