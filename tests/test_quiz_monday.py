@@ -1044,3 +1044,83 @@ def test_auto_solver_uses_visible_check_setting(quiz_on, quiz_server, monkeypatc
     main.auto_solver(llm, llm)(QUIZ_SERVER, TEAM_TOKEN, {"id": "t1", "type": "choice", "text": "수도는?",
                                                      "choices": ["부산", "서울"]})
     assert seen["visible_check"] is False
+
+
+# ── 서버 직접 풀기 안정성(코드 리뷰에서 재현한 것) ──────────────────────────
+
+def wait_until(check, seconds=3):
+    import threading
+    for _ in range(int(seconds / 0.01)):
+        if check():
+            return True
+        threading.Event().wait(0.01)
+    return False
+
+
+@pytest.mark.parametrize("bad", [
+    httpx.Response(200, text="<html>점검 중</html>"),        # JSON 이 아님
+    httpx.Response(200, json=["x"]),                         # dict 가 아님
+    httpx.Response(200, json={"state": "open", "question": "x"}),  # question 모양이 다름
+])
+def test_auto_survives_bad_response_and_keeps_polling(bad):
+    queue = [bad, httpx.Response(200, json=question(qid="t1")), httpx.Response(200, json=question(state="finished"))]
+    solved = []
+
+    def handler(request):
+        return queue.pop(0) if queue else httpx.Response(200, json=question(state="finished"))
+
+    manager = quiz_auto.AutoManager(lambda b, t, q: solved.append(q["id"]) or {"submitted": True},
+                                    httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None)
+    manager.start(QUIZ_SERVER, TEAM_TOKEN, background=False)
+    status = manager.status(TEAM_TOKEN)
+    assert solved == ["t1"] and status["running"] is False and status["stop_reason"] == "finished"
+
+
+def test_auto_unexpected_error_does_not_stay_running(monkeypatch):
+    manager = quiz_auto.AutoManager(lambda *a: {}, httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=question(qid="t1")))), sleep=lambda s: None)
+    monkeypatch.setattr(quiz_auto.AutoRun, "step", lambda self, data: 1 / 0)
+    manager.start(QUIZ_SERVER, TEAM_TOKEN, background=False)
+    status = manager.status(TEAM_TOKEN)
+    assert status["running"] is False and status["stop_reason"] == "error"
+    again, _ = manager.start(QUIZ_SERVER, TEAM_TOKEN, background=False)
+    assert again is True  # 다시 시작할 수 있다
+
+
+def test_auto_start_right_after_stop_starts_new_run():
+    manager = quiz_auto.AutoManager(lambda *a: {}, httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=question(state="lobby")))), poll=5)  # 확인 사이에 오래 기다리는 중
+    assert manager.start(QUIZ_SERVER, TEAM_TOKEN)[0] is True
+    old = manager.runs[quiz_auto.token_key(TEAM_TOKEN)]
+    assert wait_until(lambda: old.state == "lobby")
+    assert manager.stop(TEAM_TOKEN) is True
+    restarted, snapshot = manager.start(QUIZ_SERVER, TEAM_TOKEN)
+    assert restarted is True and snapshot["running"] is True  # 끝나는 중인 실행 때문에 막히지 않는다
+    assert wait_until(lambda: not old.running()) and old.stop_reason == "stopped"  # 5초 기다리지 않고 바로 멈춘다
+    new = manager.runs[quiz_auto.token_key(TEAM_TOKEN)]
+    assert new is not old and new.running()
+    manager.stop(TEAM_TOKEN)
+
+
+def test_auto_solver_treats_empty_image_url_as_text_question(quiz_on, quiz_server, monkeypatch):
+    monkeypatch.setattr(main, "quiz_auto_manager", quiz_auto.AutoManager(http=httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(404)))))
+    llm = StreamLLM(["ANSWER: 2\nREASON: 서울이 수도\n"])
+    out = main.auto_solver(llm, llm)(QUIZ_SERVER, TEAM_TOKEN, {"id": "t1", "type": "choice", "text": "수도는?",
+                                                             "choices": ["부산", "서울"], "image_url": ""})
+    assert out["choice"] == 1 and out["submitted"] is True and quiz_server["seen"][0]["choice"] == 1
+
+
+def test_auto_solver_does_not_wait_for_langfuse_flush(quiz_on, quiz_server, monkeypatch):
+    import threading
+    import time as _time
+    release = threading.Event()
+    monkeypatch.setattr(main.tracing, "flush", lambda: release.wait(2))  # Langfuse 가 느린 상황
+    monkeypatch.setattr(main, "quiz_auto_manager", quiz_auto.AutoManager(http=httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(404)))))
+    llm = StreamLLM(["ANSWER: 2\nREASON: 서울이 수도\n"])
+    started = _time.perf_counter()
+    main.auto_solver(llm, llm)(QUIZ_SERVER, TEAM_TOKEN, {"id": "t1", "type": "choice", "text": "수도는?",
+                                                     "choices": ["부산", "서울"]})
+    assert _time.perf_counter() - started < 1.0
+    release.set()
