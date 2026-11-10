@@ -13,6 +13,7 @@
 import html
 import json
 import os
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -342,7 +343,7 @@ def auto_solver(image_model, text_model):
 
     def solve_question(base, token, question):
         started = time.perf_counter()
-        image_url = question.get("image_url")
+        image_url = question.get("image_url") or None  # "" 은 그림 없음(빈 값을 그림 주소로 검사하면 400)
         full_url = image_url if not image_url or image_url.startswith("http") else f"{base}/{image_url.lstrip('/')}"
         text, image, count, trace = quiz.easy_request({"type": question.get("type"), "question": question.get("text"),
                                                        "choices": question.get("choices"), "image_url": full_url})
@@ -361,7 +362,8 @@ def auto_solver(image_model, text_model):
         done = quiz_flow.solve(chosen, text, image, count, trace, choices=trace.get("choices"),
                                question=trace.get("question"), submit=make_submit(target), started=started,
                                visible_check=settings.quiz_visible_check)
-        tracing.flush()
+        # Langfuse 로 보내기는 다음 문제 확인을 막지 않게 따로 돈다(제출은 이미 끝났다)
+        threading.Thread(target=tracing.flush, name="quiz-auto-flush", daemon=True).start()
         log("INFO", "퀴즈 풀기", mode="auto", type=trace["type"], model=chosen.model, fixed=done["notes"],
             timing=done["timing"], submit=True, answer_raw=done["answer_raw"], seen=done["seen"][:1000],
             think=done["think"][:500], version=done["version"])

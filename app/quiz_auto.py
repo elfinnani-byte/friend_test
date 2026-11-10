@@ -3,7 +3,10 @@
 start 를 받으면 퀴즈 서버의 /api/question 을 0.5초마다 확인하다가, 글이 있는 이지모드 문제가 열리면 바로 풀어 제출한다.
 - 하드모드(hidden) 문제는 건너뛰고 앱이 풀게 둔다. 이미 답을 낸 문제(my_answer)도 건너뛴다.
 - finished 가 되거나, stop 을 받거나, 30분이 지나거나, 퀴즈 서버가 401(초기화)을 주면 멈춘다.
-- 같은 token 으로는 하나만 돈다. 진행 상태는 이 인스턴스의 메모리에만 있다.
+- 같은 token 으로는 하나만 돈다. stop 을 받아 끝나는 중인 실행은 세지 않는다(바로 다시 start 할 수 있다).
+- 퀴즈 서버가 JSON 이 아니거나 모양이 다른 응답을 줘도 멈추지 않고 실패로 세어 다시 확인한다.
+  그래도 예상 못 한 오류로 끝나면 stop_reason="error" 를 남긴다(실행 중으로 남지 않게).
+- 진행 상태는 이 인스턴스의 메모리에만 있다.
 - 팀 token 은 로그와 상태 응답에 넣지 않는다. 안에서는 token 의 해시로 구분한다.
 """
 import hashlib
@@ -28,13 +31,14 @@ class AutoRun:
     """token 하나의 직접 풀기. run() 이 끝날 때까지 퀴즈 서버를 확인한다."""
 
     def __init__(self, base, token, solve_question, http, *, poll=0.5, max_seconds=1800,
-                 clock=time.monotonic, sleep=time.sleep):
+                 clock=time.monotonic, sleep=None):
         self.base, self.token = base, token
         self.solve_question, self.http = solve_question, http
-        self.poll, self.clock, self.sleep = poll, clock, sleep
+        self.poll, self.clock = poll, clock
         self.started_at = clock()
         self.deadline = self.started_at + max_seconds
         self.stop_event = threading.Event()
+        self.sleep = sleep or self.stop_event.wait  # 기다리는 중에 stop 을 받으면 바로 깬다
         self.lock = threading.Lock()
         self.handled = set()              # 풀었거나 건너뛴 문제 id
         self.attempts = {}                # 문제 id → 푼 횟수(실패하면 다시 풀기 위해)
@@ -45,6 +49,10 @@ class AutoRun:
     # ── 상태 ──
     def running(self):
         return self.stop_reason is None
+
+    def stopping(self):
+        """stop 을 받아 끝나는 중이다(다음 확인 때 멈춘다)."""
+        return self.running() and self.stop_event.is_set()
 
     def snapshot(self):
         with self.lock:
@@ -66,6 +74,13 @@ class AutoRun:
     # ── 실행 ──
     def run(self):
         log("INFO", "퀴즈 직접 풀기 시작", host=quiz_host(self.base))
+        try:
+            self._loop()
+        except Exception as error:  # 예상 못 한 오류로 끝나도 '실행 중'으로 남지 않게 한다
+            log("ERROR", "퀴즈 직접 풀기 오류", error=type(error).__name__)
+            self._stop("error")
+
+    def _loop(self):
         failures = 0
         while self.running():
             if self.stop_event.is_set():
@@ -84,12 +99,20 @@ class AutoRun:
             if r.status_code == 401:
                 self._stop("unauthorized")  # 퀴즈 서버 초기화. 앱이 다시 참가한 뒤 start 를 다시 보낸다
                 break
-            if not r.is_success:
+            data = None
+            if r.is_success:
+                try:
+                    data = r.json()
+                except ValueError:
+                    data = None
+            if not isinstance(data, dict):  # 실패 응답, JSON 이 아닌 응답(점검 페이지 등), 모양이 다른 JSON
                 failures += 1
+                if r.is_success:
+                    log("WARNING", "퀴즈 직접 풀기 응답 모양 이상", status=r.status_code, failures=failures)
                 self.sleep(min(5, self.poll * (1 + failures)))
                 continue
             failures = 0
-            self.step(r.json())
+            self.step(data)
             if self.running():
                 self.sleep(self.poll)
 
@@ -100,7 +123,8 @@ class AutoRun:
         if self.state == "finished":
             self._stop("finished")
             return
-        question = data.get("question") or {}
+        question = data.get("question")
+        question = question if isinstance(question, dict) else {}
         qid = question.get("id")
         if self.state != "open" or not qid or qid in self.handled:
             return
@@ -162,7 +186,7 @@ class AutoManager:
         key = token_key(token)
         with self.lock:
             run = self.runs.get(key)
-            if run is not None and run.running():
+            if run is not None and run.running() and not run.stopping():
                 return False, run.snapshot()
             run = AutoRun(base, token, solve_question or self.solve_question, self.http, **self.run_options)
             self.runs[key] = run
