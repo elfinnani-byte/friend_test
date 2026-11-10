@@ -293,7 +293,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         done = await run_in_threadpool(lambda: quiz_flow.solve(
             chosen, text, image, count, trace, choices=trace.get("choices"), question=trace.get("question"),
             submit=submit, started=arrived, gate_visible=gate, eval_tag=options["eval"],
-            guess=options["allow_guess"]))
+            guess=options["allow_guess"], visible_check=settings.quiz_visible_check))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
     result = dict(done["result"])
@@ -305,7 +305,8 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         timing=done["timing"], photo_bytes=trace.get("photo_bytes"),
         submit=target is not None and not done["retake"], answer_raw=done["answer_raw"], seen=done["seen"][:1000],
         think=done["think"][:500], visible=done["visible"], retake=done["retake"],
-        supports_retake=options["supports_retake"], allow_guess=options["allow_guess"], eval=options["eval"])
+        supports_retake=options["supports_retake"], allow_guess=options["allow_guess"], eval=options["eval"],
+        version=done["version"])
     return result
 
 
@@ -358,11 +359,12 @@ def auto_solver(image_model, text_model):
         chosen = quiz_flow.pick_models(image, image_model, text_model)
         target = {"base": base, "token": token, "question_id": question["id"]}
         done = quiz_flow.solve(chosen, text, image, count, trace, choices=trace.get("choices"),
-                               question=trace.get("question"), submit=make_submit(target), started=started)
+                               question=trace.get("question"), submit=make_submit(target), started=started,
+                               visible_check=settings.quiz_visible_check)
         tracing.flush()
         log("INFO", "퀴즈 풀기", mode="auto", type=trace["type"], model=chosen.model, fixed=done["notes"],
             timing=done["timing"], submit=True, answer_raw=done["answer_raw"], seen=done["seen"][:1000],
-            think=done["think"][:500])
+            think=done["think"][:500], version=done["version"])
         return {**done["result"], **(done["submission"] or {}), "timing": done["timing"],
                 "timings": quiz_flow.app_timings(done["timing"])}
 
