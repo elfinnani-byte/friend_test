@@ -787,6 +787,59 @@ def test_allow_guess_solves_and_submits_even_if_not_visible(quiz_on, quiz_server
     assert line["visible"] == "no" and "guessed_not_visible" in line["fixed"] and line["allow_guess"] is True
 
 
+UNKNOWN_CUT = ["SEEN: 그래프 오른쪽 잘림\n", "VISIBLE: no (E 쪽 간선 잘림)\n", "THINK: E 로 가는 간선이 안 보인다\n",
+               "ANSWER: 알 수 없음\n", "REASON: E 연결 간선 잘림\n"]
+
+
+def test_allow_guess_uses_guess_prompt_that_forbids_unknown(quiz_on, quiz_server):
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    hard(type="short", supports_retake="true", allow_guess="true", **submit_fields())
+    system = llm.calls[0]["system"]
+    assert system == quiz_flow.GUESS_SYSTEM and "알 수 없음" in system and "가장 그럴듯" in system
+    assert "짐작해서 채우지 않는다" not in system and "VISIBLE" in system  # VISIBLE 은 그대로 사실대로 쓴다
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    hard(type="short", supports_retake="true", **submit_fields())  # allow_guess 가 아니면 예전 지시문
+    assert llm.calls[0]["system"] == quiz_flow.IMAGE_SYSTEM
+
+
+def test_allow_guess_unknown_answer_is_asked_again_and_submitted(quiz_on, quiz_server, capsys):
+    events = []
+    llm = StreamLLM(UNKNOWN_CUT, events, retry={"answer": "11", "reason": "보이는 간선으로 추정"})
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", allow_guess="true", **submit_fields()).json()
+    assert body["text"] == "11" and body["submitted"] is True and quiz_server["seen"][0]["text"] == "11"
+    assert ("retry",) in events
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert "retry_guess" in line["fixed"] and "guessed_not_visible" in line["fixed"]
+
+
+def test_allow_guess_retry_still_unknown_keeps_answer_and_marks_it(quiz_on, quiz_server, capsys):
+    llm = StreamLLM(UNKNOWN_CUT, retry={"answer": "모름"})
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", allow_guess="true", **submit_fields()).json()
+    assert body["submitted"] is True  # 답을 안 내면 0점이라 낸다
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert "unknown_answer" in line["fixed"]
+
+
+def test_unknown_answer_without_allow_guess_is_not_asked_again(quiz_on, quiz_server):
+    events = []
+    llm = StreamLLM(UNKNOWN_CUT, events, retry={"answer": "11"})
+    use(llm, llm)
+    hard(type="short", **submit_fields())  # 옛 앱(allow_guess 없음)은 예전 그대로
+    assert ("retry",) not in events
+
+
+@pytest.mark.parametrize("answer, expected", [
+    ("알 수 없음", True), ("알수없음", True), ("모름", True), ("모르겠다", True), ("판단 불가", True),
+    ("답을 정할 수 없다", True), ("unknown", True), ("N/A", True), ("?", True),
+    ("11", False), ("QUIZ 1109", False), ("없음", False), ("79000", False), ("", False),
+])
+def test_is_unknown(answer, expected):
+    assert quiz.is_unknown(answer) is expected
+
 def test_visible_yes_goes_on_as_before(quiz_on, quiz_server):
     llm = StreamLLM(["SEEN: 표 전체\nVISIBLE: yes\nTHINK: 다 더한다\nANSWER: 79000\nREASON: 품목별 금액 합계\n"])
     use(llm, llm)
