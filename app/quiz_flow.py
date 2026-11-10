@@ -7,6 +7,8 @@
   응답은 {"retake": true, "missing": "안 보이는 부분"} — 앱이 다시 찍어 allow_guess=true 로 보내면 끝까지 풀어 제출한다.
 - allow_guess=true 그림은 GUESS_SYSTEM 으로 푼다: '알 수 없음' 금지, 보이는 정보로 가장 그럴듯한 답을 반드시 낸다.
   그래도 단답이 '알 수 없음' 같은 말이면 답만 한 번 더 묻는다.
+- QUIZ_VISIBLE_CHECK=off 면 고치기 전 지시문(IMAGE_SYSTEM_V1: SEEN → THINK → ANSWER → REASON)으로 끝까지 푼다
+  (다시 찍기·추측 재시도 없음). Langfuse 트레이스 version 은 on 이면 quiz-v2-visible, off 면 quiz-v1.
 - REASON 줄이 끝나는 즉시(줄바꿈이 없으면 근거가 20자에 닿는 순간) 답과 근거를 /api/answer 에 한 번 제출한다.
   퀴즈 서버에는 근거만 따로 받는 엔드포인트가 없고, 같은 문제에 두 번 내면 409 라서 한 번에 낸다.
 - 객관식 번호를 못 읽으면 번호만 한 번 더 묻고, 그래도 없으면 1번을 낸다(답을 안 내면 0점).
@@ -49,6 +51,24 @@ IMAGE_SYSTEM = "\n".join([
     "- 안 보이는 부분을 짐작해서 채우지 않는다. 보이는 것만으로 답이 정해지지 않으면 no 다.",
     *_COMMON,
 ])
+# QUIZ_VISIBLE_CHECK=off: 고치기 전(퀘스트 3단계 전) 그림 지시문. VISIBLE 이 없고 끝까지 푼다
+IMAGE_SYSTEM_V1 = "\n".join([
+    "너는 퀴즈 대결에서 문제를 푸는 선수다. 그림(또는 퀴즈 화면 사진)을 보고 정답 하나를 고른다.",
+    "아래 네 항목을 이 순서로 출력한다.",
+    "SEEN: 그림 속 문제 글, 보기, 코드, 숫자를 보이는 그대로 옮겨 적는다. 여러 줄이어도 된다.",
+    "THINK: 두세 줄로 생각한다.",
+    "ANSWER: 답",
+    "REASON: 근거",
+    "- SEEN 은 해석하지 말고 보이는 글자를 그대로 옮긴다. 코드는 줄바꿈과 들여쓰기를 지킨다.",
+    *_COMMON,
+])
+VERSION_VISIBLE, VERSION_V1 = "quiz-v2-visible", "quiz-v1"  # Langfuse 트레이스 version
+
+
+def quiz_version(visible_check):
+    return VERSION_VISIBLE if visible_check else VERSION_V1
+
+
 # allow_guess(다시 찍은 두 번째 사진): VISIBLE 은 사실대로 쓰되, 안 보여도 답은 반드시 낸다
 _NO_GUESS = "- 안 보이는 부분을 짐작해서 채우지 않는다. 보이는 것만으로 답이 정해지지 않으면 no 다."
 GUESS_SYSTEM = IMAGE_SYSTEM.replace(_NO_GUESS, "\n".join([
@@ -153,24 +173,36 @@ def elapsed_ms(started):
 
 
 def solve(model, text, image, count, trace, *, choices=None, question=None, submit=None, started=None,
-          gate_visible=False, eval_tag=None, guess=False):
+          gate_visible=False, eval_tag=None, guess=False, visible_check=True):
     """한 문제를 풀고(필요하면 제출까지) {"result", "notes", "timing", "seen", "think", "submission",
     "visible", "retake"} 을 돌려준다.
 
     submit(answer_part, reason) 은 제출 함수(없으면 제출하지 않는다). 객관식은 번호를 못 읽어도 반드시 답을 만든다.
     gate_visible=True(하드모드 사진, allow_guess 아님)면 VISIBLE: no 에서 멈추고 제출하지 않는다(result 는 retake).
     guess=True(allow_guess)면 그림을 GUESS_SYSTEM 으로 풀고, 단답이 '알 수 없음' 같은 말이면 답만 한 번 더 묻는다.
+    visible_check=False(QUIZ_VISIBLE_CHECK=off)면 고치기 전처럼 VISIBLE 없이 끝까지 푼다(gate_visible, guess 무시).
     eval_tag 는 Langfuse metadata 의 eval 로 남긴다(측정 구분용). 단답을 끝내 못 만들면 QuizError(502).
     """
     started = started or time.perf_counter()
     timing, notes = {}, []
-    system = (GUESS_SYSTEM if guess else IMAGE_SYSTEM) if image is not None else TEXT_SYSTEM
+    if not visible_check:
+        gate_visible = guess = False
+    version = quiz_version(visible_check)
+    if image is None:
+        system = TEXT_SYSTEM
+    elif not visible_check:
+        system = IMAGE_SYSTEM_V1
+    else:
+        system = GUESS_SYSTEM if guess else IMAGE_SYSTEM
     limit = QUIZ_MAX_TOKENS_IMAGE if image is not None else QUIZ_MAX_TOKENS_TEXT
     lines = QuizLines()
     error, retake, visible, missing = None, False, None, ""
-    meta = {"mode": trace["mode"], "type": trace["type"], "image": image is not None,
+    meta = {"mode": trace["mode"], "type": trace["type"], "image": image is not None, "version": version,
             **({"eval": eval_tag} if eval_tag else {})}
-    with tracing.observe("quiz-solve", "generation", model=model.model, input=trace, metadata=meta) as observation:
+    # 트레이스 version 으로 배포 뒤 트레이스를 나눠 본다(관찰 version 과 metadata 에도 같은 값)
+    with tracing.version_scope(version), \
+            tracing.observe("quiz-solve", "generation", model=model.model, input=trace, metadata=meta,
+                            version=version) as observation:
         stream = model.stream_quiz(system, text, image, limit, trace)
         try:
             for chunk in stream:
@@ -204,7 +236,7 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
         log("INFO", "퀴즈 다시 찍기", mode=trace["mode"], missing=missing)
         return {"result": {"retake": True, "missing": missing or "답에 필요한 부분이 안 보임"}, "notes": ["retake"],
                 "timing": timing, "seen": lines.text("SEEN"), "think": "", "submission": None,
-                "answer_raw": "", "visible": "no", "retake": True}
+                "answer_raw": "", "visible": "no", "retake": True, "version": version}
     timing.setdefault("answer", elapsed_ms(started))
     answer, reason = lines.text("ANSWER"), quiz.clip_reason(lines.text("REASON"), QUIZ_REASON_MAX)
     if lines.reason_cut or len(lines.text("REASON")) > QUIZ_REASON_MAX:
@@ -236,6 +268,7 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
     done["answer_raw"] = answer[:100]  # 로그용: 모델이 쓴 ANSWER 줄 그대로
     done["visible"] = {True: "yes", False: "no"}.get(visible)
     done["retake"] = False
+    done["version"] = version
     return done
 
 

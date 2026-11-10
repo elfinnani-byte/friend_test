@@ -53,6 +53,7 @@ class Settings:
     quiz_rate_per_minute: int # IP 하나가 1분에 보낼 수 있는 퀴즈 요청 수
     quiz_server_allowlist: list  # 답을 대신 제출해도 되는 퀴즈 서버 주소 패턴(https, * 는 점 없는 글자들)
     quiz_server_submit: bool  # false 면 제출 정보가 와도 퀴즈 서버에 내지 않고 답만 돌려준다(앱이 직접 낸다)
+    quiz_visible_check: bool  # QUIZ_VISIBLE_CHECK: on(기본)이면 VISIBLE 판단·다시 찍기, off 면 고치기 전처럼 끝까지 풀기
 
 
 def load_dotenv(path):
@@ -132,6 +133,7 @@ def load_settings():
         quiz_auto_enabled=env_flag("QUIZ_AUTO_ENABLED", False),
         quiz_rate_per_minute=int(os.environ.get("QUIZ_RATE_PER_MINUTE", "10") or 10),
         quiz_server_submit=env_flag("QUIZ_SERVER_SUBMIT", True),
+        quiz_visible_check=env_flag("QUIZ_VISIBLE_CHECK", True),
         quiz_server_allowlist=[p.strip() for p in (os.environ.get("QUIZ_SERVER_ALLOWLIST", "").strip()
                                                    or "https://quiz-battle*.us-central1.run.app").split(",") if p.strip()],
     )

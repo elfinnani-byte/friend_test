@@ -140,6 +140,13 @@ class Attributes:
             yield
 
 
+@contextmanager
+def version_scope(version):
+    """이 구간에서 만드는 관찰의 트레이스 version 을 정한다(퀴즈 풀기 방식 구분: quiz-v1, quiz-v2-visible)."""
+    with propagate_attributes(version=version):
+        yield
+
+
 def prompt_label(env):
     """서비스가 가져올 프롬프트 라벨. ENV 가 production 이면 production, 그 밖에는(staging, local) staging."""
     return "production" if env == "production" else "staging"
