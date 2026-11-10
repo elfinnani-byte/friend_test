@@ -45,6 +45,7 @@ class StreamLLM:
 def quiz_on(monkeypatch):
     monkeypatch.setattr(main.settings, "quiz_enabled", True)
     monkeypatch.setattr(main.settings, "quiz_server_submit", True)
+    monkeypatch.setattr(main.settings, "quiz_visible_check", True)
     monkeypatch.setattr(main.settings, "quiz_server_allowlist", ["https://quiz-battle*.us-central1.run.app"])
     monkeypatch.setattr(main, "quiz_limiter", quiz.RateLimiter(1000))
     yield
@@ -913,3 +914,98 @@ def test_quiz_eval_counts_retake(tmp_path):
     assert sent[0]["eval"] == "after" and sent[0]["supports_retake"] == "true" and "allow_guess" not in sent[0]
     assert rows[0]["retake"] is True and rows[0]["ok"] is False and rows[0]["missing"] == "표 아래 잘림"
     assert "다시 찍기" in quiz_eval.table(rows) and "다시 찍기 1번" in quiz_eval.summary(rows)
+
+
+# ── QUIZ_VISIBLE_CHECK 와 Langfuse version(배포 뒤 트레이스를 version 으로 나눠 보기) ──────────
+
+def langfuse_spans(monkeypatch):
+    """quiz-solve 관찰을 메모리에 모은다. (exporter, flush)"""
+    import uuid
+
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app import tracing
+    exporter = InMemorySpanExporter()
+    key = uuid.uuid4().hex
+    monkeypatch.setattr(tracing, "_client", Langfuse(public_key=f"pk-lf-{key}", secret_key=f"sk-lf-{key}",
+                                                     base_url="http://localhost:1", span_exporter=exporter))
+    monkeypatch.setattr(tracing, "_enabled", True)
+    return exporter, lambda: tracing.client().flush()
+
+
+@pytest.mark.parametrize("value, expected", [("", True), ("on", True), ("off", False), ("false", False),
+                                             ("true", True)])
+def test_quiz_visible_check_setting(monkeypatch, value, expected):
+    from app.config import load_settings
+    monkeypatch.setenv("QUIZ_VISIBLE_CHECK", value)
+    assert load_settings().quiz_visible_check is expected
+
+
+def test_version_names():
+    assert quiz_flow.quiz_version(True) == "quiz-v2-visible" and quiz_flow.quiz_version(False) == "quiz-v1"
+    v1 = quiz_flow.IMAGE_SYSTEM_V1
+    assert "VISIBLE" not in v1 and v1.index("SEEN:") < v1.index("THINK:") < v1.index("ANSWER: 답")
+
+
+def test_visible_check_on_traces_v2_and_keeps_retake(quiz_on, quiz_server, monkeypatch, capsys):
+    exporter, flush = langfuse_spans(monkeypatch)
+    llm = StreamLLM(CUT)
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", eval="version-compare", **submit_fields()).json()
+    assert body["retake"] is True and quiz_server["seen"] == []
+    assert llm.calls[0]["system"] == quiz_flow.IMAGE_SYSTEM
+    flush()
+    attrs = next(s for s in exporter.get_finished_spans() if s.name == "quiz-solve").attributes
+    assert attrs["langfuse.version"] == "quiz-v2-visible"
+    assert json.loads(attrs["langfuse.observation.metadata.version"]) == "quiz-v2-visible"
+    assert json.loads(attrs["langfuse.observation.metadata.eval"]) == "version-compare"  # eval 은 그대로
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert line["version"] == "quiz-v2-visible"
+
+
+def test_visible_check_off_solves_to_the_end_like_v1(quiz_on, quiz_server, monkeypatch, capsys):
+    monkeypatch.setattr(main.settings, "quiz_visible_check", False)
+    exporter, flush = langfuse_spans(monkeypatch)
+    v1_stream = ["SEEN: 표 위 두 줄\n", "THINK: 보이는 것만 더한다\n", "ANSWER: 45000\n", "REASON: 노트와 펜 합계\n"]
+    llm = StreamLLM(v1_stream, retry={"answer": "11"})
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", allow_guess="true", eval="version-compare",
+                **submit_fields()).json()
+    assert "retake" not in body and body["text"] == "45000" and body["submitted"] is True
+    assert llm.calls[0]["system"] == quiz_flow.IMAGE_SYSTEM_V1  # allow_guess 여도 v1 지시문
+    flush()
+    attrs = next(s for s in exporter.get_finished_spans() if s.name == "quiz-solve").attributes
+    assert attrs["langfuse.version"] == "quiz-v1"
+    assert json.loads(attrs["langfuse.observation.metadata.version"]) == "quiz-v1"
+    assert json.loads(attrs["langfuse.observation.metadata.eval"]) == "version-compare"
+    line = next(json.loads(x) for x in capsys.readouterr().out.splitlines() if '"퀴즈 풀기"' in x)
+    assert line["version"] == "quiz-v1" and line["retake"] is False and line["visible"] is None
+
+
+def test_visible_check_off_ignores_visible_no_even_if_model_writes_it(quiz_on, quiz_server, monkeypatch):
+    # off 인데 모델이 VISIBLE: no 를 써도 멈추지 않고 '알 수 없음' 재시도도 하지 않는다(고치기 전 동작)
+    monkeypatch.setattr(main.settings, "quiz_visible_check", False)
+    events = []
+    llm = StreamLLM(UNKNOWN_CUT, events, retry={"answer": "11"})
+    use(llm, llm)
+    body = hard(type="short", supports_retake="true", allow_guess="true", **submit_fields()).json()
+    assert "retake" not in body and body["submitted"] is True and ("retry",) not in events
+
+
+def test_auto_solver_uses_visible_check_setting(quiz_on, quiz_server, monkeypatch):
+    monkeypatch.setattr(main.settings, "quiz_visible_check", False)
+    monkeypatch.setattr(main, "quiz_auto_manager", quiz_auto.AutoManager(http=httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(404)))))
+    seen = {}
+    real = quiz_flow.solve
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(quiz_flow, "solve", spy)
+    llm = StreamLLM(["ANSWER: 2\nREASON: 서울이 수도\n"])
+    main.auto_solver(llm, llm)(QUIZ_SERVER, TEAM_TOKEN, {"id": "t1", "type": "choice", "text": "수도는?",
+                                                     "choices": ["부산", "서울"]})
+    assert seen["visible_check"] is False
