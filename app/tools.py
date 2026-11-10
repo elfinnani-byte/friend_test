@@ -192,12 +192,17 @@ def list_reminders(args, ctx):
                       {"reminders": [{"id": r["id"], "text": r["text"], "due_at": r["due_at"].isoformat()} for r in items]})
 
 
+# 어느 약속인지 가리키지 않는 말. 이때만 하나뿐인 약속을 취소한다(다른 약속 이름이면 취소하지 않는다)
+GENERIC_REMINDER_QUERIES = {"", "알림", "약속", "리마인더", "그거", "그것", "이거", "이것", "그 알림", "그 약속", "아까 거",
+                            "방금 거", "방금 알림", "방금 약속"}
+
+
 def cancel_reminder(args, ctx):
     query = str(args.get("query") or "").strip()
     items = ctx.store.list_reminders(ctx.user_id, status="pending")
     match = next((r for r in items if query and (query in r["text"] or r["text"] in query)), None)
-    if not match and len(items) == 1:
-        match = items[0]
+    if not match and len(items) == 1 and query in GENERIC_REMINDER_QUERIES:
+        match = items[0]  # "알림 취소해"처럼 무엇인지 말하지 않았고 약속이 하나뿐이면 그것이다
     if not match:
         return ToolResult("cancel_reminder", False, f"'{query}'에 해당하는 약속을 찾지 못했습니다.")
     ctx.store.cancel_reminder(ctx.user_id, match["id"])

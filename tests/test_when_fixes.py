@@ -154,3 +154,92 @@ def test_t28_wrong_month_still_fails():
     # 기간을 말한 질문은 모델 값을 그대로 쓰므로, 틀린 달은 그대로 틀린다
     assert score("T28", "get_holidays", {"from": "2026-11-01", "to": "2026-11-30"}) == \
         (True, ["from: 정답 2026-12-01, 결과 2026-11-01", "to: 정답 2026-12-31, 결과 2026-11-30"])
+
+
+# ── 3. 코드 리뷰에서 재현한 시각 오류(밤 12시, 점심 1시, 상대 시각, 날짜가 있는 전날, 연말 연도) ──────────
+
+@pytest.mark.parametrize("text, hm", [
+    ("밤 12시", (24, 0)), ("저녁 12시", (24, 0)), ("밤 2시", (2, 0)), ("밤 9시", (21, 0)), ("밤 11시 반", (23, 30)),
+    ("점심 1시", (13, 0)), ("점심 12시", (12, 0)), ("오후 3시", (15, 0)), ("아침 7시", (7, 0)), ("새벽 4시", (4, 0)),
+    ("3시", (15, 0)), ("9시", (9, 0)),
+    ("점심 먹고 오후 3시", (15, 0)), ("오전 회의 끝나고 저녁 7시", (19, 0)),  # 시각 바로 앞의 때 표현
+])
+def test_clock_uses_the_part_of_day_next_to_the_hour(text, hm):
+    assert when.clock(text)[:2] == hm
+
+
+@pytest.mark.parametrize("message, due", [
+    ("오늘 밤 12시에 알려줘", "2026-10-13T00:00"),                 # 밤 12시 = 자정(다음 날 0시)
+    ("점심 1시에 약 먹으라고 알려줘", "2026-10-13T13:00"),          # 오늘 13시는 지났다 → 내일
+    ("점심 먹고 오후 3시에 회의라고 알려줘", "2026-10-12T15:00"),
+    ("1시간 30분 뒤에 알려줘", "2026-10-12T15:30"),
+    ("2시간 반 뒤에 알려줘", "2026-10-12T16:30"),
+    ("2시간 이따가 물 마시라고 알려줘", "2026-10-12T16:00"),
+    ("3일 뒤 아침에 약 먹으라고 알려줘", "2026-10-15T08:00"),
+    ("내일모레 아침에 약 먹으라고 알려줘", "2026-10-14T08:00"),
+    ("뒤에 있는 우산 챙기라고 1시간 뒤에 알려줘", "2026-10-12T15:00"),  # 숫자 없는 '뒤'는 상대 시각이 아니다
+])
+def test_parse_when_review_cases(message, due):
+    assert when.parse_when(message, NOW) == datetime.fromisoformat(due + ":00+09:00")
+
+
+@pytest.mark.parametrize("message, model_due", [
+    ("금요일 시험 전날 밤 12시에 자라고 알려줘", "2026-10-16T00:00:00+09:00"),  # 목요일 밤 12시 = 금요일 0시
+    ("금요일 시험 전날 점심 1시에 약 먹으라고 알려줘", "2026-10-15T13:00:00+09:00"),
+])
+def test_model_due_at_right_answer_is_not_overwritten(message, model_due):
+    args, guards = model_args(message, "create_reminder", {"text": "알림", "due_at": model_due})
+    assert args["due_at"] == model_due and guards == []
+
+
+@pytest.mark.parametrize("message", [
+    "12월 4일 금요일 시험 전날 밤에 알려줘",     # 날짜가 있다
+    "다다음 주 금요일 시험 전날 밤에 알려줘",     # '다음 주'만으로 정할 수 없다
+    "다음달 첫 금요일 전날 밤에 알려줘",
+    "다음 달 첫째 금요일 전날 밤에 알려줘",
+])
+def test_dated_or_far_weekday_keeps_model_due_at(message):
+    assert when.shifted_when(message, NOW) is None
+    model_due = "2026-12-03T21:00:00+09:00"
+    args, guards = model_args(message, "create_reminder", {"text": "알림", "due_at": model_due})
+    assert args["due_at"] == model_due and guards == []
+
+
+@pytest.mark.parametrize("value, now, expected", [
+    ("2025-01-02T09:00:00+09:00", "2026-12-30T10:00:00+09:00", ("2027-01-02T09:00:00+09:00", True)),  # 연말
+    ("2025-12-01", "2026-11-10T10:00:00+09:00", ("2026-12-01", True)),
+    ("2024-02-29", "2026-11-10T10:00:00+09:00", ("2024-02-29", False)),  # 없는 날짜가 되면 바꾸지 않는다
+    ("2026-03-01", "2026-11-10T10:00:00+09:00", ("2026-03-01", False)),  # 올해는 그대로
+])
+def test_fix_year_moves_past_dates_to_next_year(value, now, expected):
+    assert when.fix_year(value, datetime.fromisoformat(now)) == expected
+
+
+@pytest.mark.parametrize("message, text", [
+    ("1시간 30분 뒤에 약 먹으라고 알려줘", "약 먹기"),
+    ("2시간 반 이따가 물 마시라고 알려줘", "물 마시기"),
+    ("에어컨 끄라고 30분 뒤에 알려줘", "에어컨 끄기"),
+    ("뒤에 있는 우산 챙기라고 1시간 뒤에 알려줘", "뒤에 있는 우산 챙기기"),
+])
+def test_reminder_text_drops_relative_time_whole(message, text):
+    assert router.reminder_text(message) == text
+
+
+# ── 4. 약속 취소: 다른 약속 이름이면 하나뿐인 약속도 취소하지 않는다 ──────────
+
+@pytest.mark.parametrize("query, cancelled", [
+    ("약 먹기", False),      # 다른 약속 이름 → 취소하지 않는다
+    ("우산", True),          # 이름이 맞음
+    ("알림", True),          # 무엇인지 말하지 않음 + 약속이 하나뿐 → 그것
+    ("", True),
+])
+def test_cancel_reminder_does_not_cancel_a_different_one(query, cancelled):
+    from datetime import timedelta
+
+    from app import tools
+    from app.store.memory_store import MemoryStore
+    store = MemoryStore()
+    store.add_reminder("u", "우산 챙기기", NOW + timedelta(days=1))
+    result = tools.cancel_reminder({"query": query}, tools.Context(store, "u", "서울", "Asia/Seoul"))
+    assert result.ok is cancelled
+    assert store.list_reminders("u")[0]["status"] == ("cancelled" if cancelled else "pending")
