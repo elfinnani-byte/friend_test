@@ -269,6 +269,7 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
                 raise quiz.QuizError(413, "사진은 5MB 이하만 받습니다.")
             # 제출 정보는 모델을 부르기 전에 검사한다(허용되지 않은 주소면 모델 비용 없이 400)
             target = submit_target(form)
+            options = quiz.solve_options(form)
             text, image, count, trace = quiz.hard_request(form.get("type"), form.get("choice_count"), data,
                                                           photo.content_type)
             lap("photo")
@@ -279,14 +280,18 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
                 raise quiz.QuizError(400, "JSON 또는 multipart 사진을 보내 주세요.") from None
             lap("receive")
             target = submit_target(body if isinstance(body, dict) else {})
+            options = quiz.solve_options(body if isinstance(body, dict) else {})
             text, image, count, trace = quiz.easy_request(body)
 
         # 그림이 있으면 그림 모델(QUIZ_MODEL), 없으면 글 모델(QUIZ_MODEL_TEXT). 스트리밍으로 받아 근거가 끝나면 바로 제출
         chosen = quiz_flow.pick_models(image, model, text_model)
         submit = make_submit(target) if target is not None else None
+        # 하드모드 사진만 VISIBLE: no 에서 멈추고 다시 찍기를 알린다(이지모드 그림은 다시 찍을 사진이 없다).
+        # allow_guess=true(다시 찍은 두 번째 사진)면 안 보여도 끝까지 풀어 제출한다
+        gate = trace["mode"] == "hard" and not options["allow_guess"]
         done = await run_in_threadpool(lambda: quiz_flow.solve(
             chosen, text, image, count, trace, choices=trace.get("choices"), question=trace.get("question"),
-            submit=submit, started=arrived))
+            submit=submit, started=arrived, gate_visible=gate, eval_tag=options["eval"]))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
     result = dict(done["result"])
@@ -296,7 +301,9 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
     result["timings"] = quiz_flow.app_timings(done["timing"])  # 앱이 읽는 이름(first_token_ms, submit_ms, reason_ms)
     log("INFO", "퀴즈 풀기", mode=trace["mode"], type=trace["type"], model=chosen.model, fixed=done["notes"], ms=ms,
         timing=done["timing"], photo_bytes=trace.get("photo_bytes"),
-        submit=target is not None, answer_raw=done["answer_raw"], seen=done["seen"][:1000], think=done["think"][:500])
+        submit=target is not None and not done["retake"], answer_raw=done["answer_raw"], seen=done["seen"][:1000],
+        think=done["think"][:500], visible=done["visible"], retake=done["retake"],
+        allow_guess=options["allow_guess"], eval=options["eval"])
     return result
 
 
