@@ -293,3 +293,75 @@ def test_default_sampler_drops_turn_under_unsampled_parent():
     # 대조군: 기본 샘플러(ParentBased)는 원격 부모가 '샘플 안 함'이면 아무것도 기록하지 않는다(staging 에서 빠진 원인)
     from opentelemetry.sdk.trace import TracerProvider
     assert turn_spans_under_unsampled_parent(TracerProvider()) == ()
+
+
+# ── 코드 리뷰에서 재현한 마스킹 빈틈 ──────────────────────────────────
+
+@pytest.mark.parametrize("text, expected", [
+    ("010 - 1234 - 5678 로", "[전화번호] 로"),          # 하이픈 앞뒤 공백
+    ("사무실 02)1234-5678", "사무실 [전화번호]"),          # 지역번호 뒤 괄호
+    ("010－1234－5678", "[전화번호]"),                   # 전각 하이픈
+    ("카드 1234.5678.9012.3456", "카드 [카드번호]"),
+    ("카드 1234 - 5678 - 9012 - 3456", "카드 [카드번호]"),
+    ("2026.11.02 15:30 회의, v1.2.3, 192.168.0.1", "2026.11.02 15:30 회의, v1.2.3, 192.168.0.1"),  # 날짜·버전·IP 는 그대로
+])
+def test_mask_text_more_separators(text, expected):
+    assert tracing.mask_text(text) == expected
+
+
+def test_mask_value_masks_bare_number_in_text_attributes_only():
+    assert tracing.mask_value("4111111111111111") == "[카드번호]"            # 입력·출력 원문(기본)
+    assert tracing.mask_value("4111111111111111", text=False) == "4111111111111111"  # 다른 metadata 숫자는 그대로
+    assert tracing.mask_value("42") == "42"
+
+
+def test_card_number_only_message_is_masked_in_export(exported):
+    list(agent.run_turn("4111111111111111", "u9", FakeLLM(delay=0), MemoryStore(), show_panel=False))
+    turn = spans_by_name(exported)["chat-turn"]
+    assert "4111111111111111" not in json.dumps(dict(turn.attributes), ensure_ascii=False)
+
+
+# ── 대화 중 '내 데이터 모두 삭제': 진행 중인 턴이 기억·요약을 다시 쓰지 않는다 ──────────
+
+class DeletingLLM(FakeLLM):
+    """기억 정리(complete_json)를 하는 사이에 사용자가 전체 삭제를 누른 상황."""
+
+    can_reason = True  # 기억 정리를 모델(complete_json)로 하게 한다
+
+    def __init__(self, store, uid, when_called):
+        super().__init__(delay=0)
+        self.store, self.uid, self.when_called = store, uid, when_called
+
+    def complete_json(self, system, user):
+        if system != memory.EXTRACT_PROMPT:
+            return {"tools": [], "confidence": 0.9, "reason": "가짜"}  # 도구 선택
+        if self.when_called == "memory":
+            self.store.delete_all(self.uid)
+        return {"add": [{"kind": "fact", "text": "사용자 이름은 지수"}]}
+
+
+def test_delete_all_during_memory_update_does_not_resurrect():
+    store = MemoryStore()
+    events = list(agent.run_turn("내 이름은 지수야", "u1", DeletingLLM(store, "u1", "memory"), store, show_panel=False))
+    assert store.list_memories("u1") == [] and store.recent_messages("u1", 10) == []
+    assert events[-1] == {"type": "done", "message_id": None}
+
+
+def test_delete_all_during_reply_skips_memory():
+    store = MemoryStore()
+
+    class DeleteWhileReplying(FakeLLM):
+        def chat_stream(self, messages, observation=None):
+            store.delete_all("u2")
+            yield "알겠어"
+
+    events = list(agent.run_turn("내 이름은 지수야", "u2", DeleteWhileReplying(delay=0), store, show_panel=False))
+    assert store.list_memories("u2") == [] and store.recent_messages("u2", 10) == []
+    assert "memory_start" not in [e["type"] for e in events] and events[-1]["message_id"] is None
+
+
+def test_normal_turn_still_saves_memory_and_message_id():
+    store = MemoryStore()
+    events = list(agent.run_turn("내 이름은 지수야", "u3", DeletingLLM(store, "u3", "never"), store, show_panel=False))
+    assert [m["text"] for m in store.list_memories("u3")] == ["사용자 이름은 지수"]
+    assert events[-1]["type"] == "done" and events[-1]["message_id"] is not None

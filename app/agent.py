@@ -56,13 +56,18 @@ def run_turn(message, uid, llm, store, show_panel):
         tracing.flush()
 
 
+def deleted_meanwhile(store, uid, asked):
+    """이번 턴의 질문이 사라졌으면 그사이 '내 데이터 모두 삭제'가 있었던 것이다(메시지를 하나씩 지우는 기능은 없다)."""
+    return not asked or store.get_message(uid, asked["id"]) is None
+
+
 def _run_turn(message, uid, llm, store, show_panel, turn, attrs):
     settings = store.get_settings(uid)
     character = store.get_character(uid) or DEFAULT_CHARACTER
     now = when.now_in(settings["timezone"])
     memories, summary, recent = memory.build_context(store, uid)
     history = [{"role": m["role"], "content": m["content"]} for m in recent]
-    store.add_message(uid, "user", message)
+    asked = store.add_message(uid, "user", message)
 
     # ① 위기 표현. 태그는 관찰을 만들 때만 붙으므로, 판정을 먼저 하고 safety 관찰을 연다
     crisis = is_crisis(message)
@@ -130,7 +135,12 @@ def _run_turn(message, uid, llm, store, show_panel, turn, attrs):
             "action": choice.action, "guards": choice.guards}
     saved = store.add_message(uid, "assistant", reply, tracing.link(meta, turn))
 
-    # ⑤ 기억 정리
+    # ⑤ 기억 정리. 답을 만드는 동안 '내 데이터 모두 삭제'를 했으면(이번 질문이 사라짐) 기억과 요약을 쓰지 않는다
+    if deleted_meanwhile(store, uid, asked):
+        store.delete_all(uid)  # 삭제 뒤에 저장된 이번 답까지 지운다
+        log("INFO", "대화 중 데이터 삭제", step="before_memory")
+        yield {"type": "done", "message_id": None}
+        return
     yield {"type": "memory_start"}
     with attrs.scope(), tracing.observe("memory-update", "generation", parent=turn, model=llm.model,
                                         input={"user": message, "assistant": reply}) as observation:
@@ -138,6 +148,11 @@ def _run_turn(message, uid, llm, store, show_panel, turn, attrs):
         observation.update(output={kind: [m["text"] for m in items] for kind, items in changes.items()})
     with attrs.scope():
         memory.maybe_summarize(store, uid, llm, parent=turn)
+    if deleted_meanwhile(store, uid, asked):
+        store.delete_all(uid)  # 기억 정리 중에 삭제했으면 방금 쓴 기억·요약도 지운다
+        log("INFO", "대화 중 데이터 삭제", step="after_memory")
+        yield {"type": "done", "message_id": None}
+        return
     yield {"type": "memory", "added": [m["text"] for m in changes["added"]],
            "updated": [m["text"] for m in changes["updated"]], "removed": [m["text"] for m in changes["removed"]]}
     yield {"type": "done", "message_id": saved["id"]}

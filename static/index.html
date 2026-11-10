@@ -492,7 +492,7 @@ async function send(text) {
           panel?.memory(e);
           refreshCount();
         }
-        else if (e.type === "done") { finished = true; bubble.textContent = reply || bubble.textContent; bindReplyActions(row, e.message_id); }
+        else if (e.type === "done") { finished = true; bubble.textContent = reply || bubble.textContent; if (e.message_id) bindReplyActions(row, e.message_id); }
         else if (e.type === "error") { finished = true; bubble.textContent = e.message; }
       }
     }
@@ -675,6 +675,7 @@ async function loadMemory() {
 async function refreshCount() { const m = await api("/api/memories"); $("#memCount").textContent = m.length || ""; }
 $("#clearMem").onclick = async () => { if (confirm("기억을 모두 지울까요?")) { await api("/api/memories", {method: "DELETE"}); loadMemory(); } };
 $("#deleteAll").onclick = async () => {
+  if (busy) { alert("답을 받는 중이에요. 답이 끝난 뒤에 지워 주세요."); return; }  // 진행 중인 턴이 기억을 다시 쓰지 않게
   if (!confirm("캐릭터, 대화, 기억, 약속을 모두 지웁니다. 되돌릴 수 없습니다. 계속할까요?")) return;
   await api("/api/data", {method: "DELETE"}); location.reload();
 };
