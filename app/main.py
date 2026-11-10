@@ -292,7 +292,8 @@ async def solve_quiz(request: Request, background: BackgroundTasks, model=Depend
         gate = trace["mode"] == "hard" and options["supports_retake"] and not options["allow_guess"]
         done = await run_in_threadpool(lambda: quiz_flow.solve(
             chosen, text, image, count, trace, choices=trace.get("choices"), question=trace.get("question"),
-            submit=submit, started=arrived, gate_visible=gate, eval_tag=options["eval"]))
+            submit=submit, started=arrived, gate_visible=gate, eval_tag=options["eval"],
+            guess=options["allow_guess"]))
     except quiz.QuizError as error:
         return JSONResponse({"error": "quiz_error", "message": error.message}, status_code=error.status)
     result = dict(done["result"])

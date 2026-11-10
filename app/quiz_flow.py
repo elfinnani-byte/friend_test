@@ -5,6 +5,8 @@
   SEEN, VISIBLE, THINK 는 퀴즈 서버에 보내지 않고 로그에만 남긴다.
 - 하드모드 사진에서 VISIBLE: no(답에 필요한 그림·표·보기가 잘리거나 읽을 수 없음)면 그 자리에서 멈추고 제출하지 않는다.
   응답은 {"retake": true, "missing": "안 보이는 부분"} — 앱이 다시 찍어 allow_guess=true 로 보내면 끝까지 풀어 제출한다.
+- allow_guess=true 그림은 GUESS_SYSTEM 으로 푼다: '알 수 없음' 금지, 보이는 정보로 가장 그럴듯한 답을 반드시 낸다.
+  그래도 단답이 '알 수 없음' 같은 말이면 답만 한 번 더 묻는다.
 - REASON 줄이 끝나는 즉시(줄바꿈이 없으면 근거가 20자에 닿는 순간) 답과 근거를 /api/answer 에 한 번 제출한다.
   퀴즈 서버에는 근거만 따로 받는 엔드포인트가 없고, 같은 문제에 두 번 내면 409 라서 한 번에 낸다.
 - 객관식 번호를 못 읽으면 번호만 한 번 더 묻고, 그래도 없으면 1번을 낸다(답을 안 내면 0점).
@@ -47,6 +49,13 @@ IMAGE_SYSTEM = "\n".join([
     "- 안 보이는 부분을 짐작해서 채우지 않는다. 보이는 것만으로 답이 정해지지 않으면 no 다.",
     *_COMMON,
 ])
+# allow_guess(다시 찍은 두 번째 사진): VISIBLE 은 사실대로 쓰되, 안 보여도 답은 반드시 낸다
+_NO_GUESS = "- 안 보이는 부분을 짐작해서 채우지 않는다. 보이는 것만으로 답이 정해지지 않으면 no 다."
+GUESS_SYSTEM = IMAGE_SYSTEM.replace(_NO_GUESS, "\n".join([
+    "- VISIBLE 은 사실대로 쓴다. 보이는 것만으로 답이 정해지지 않으면 no 다.",
+    "- 그래도 ANSWER 는 반드시 답 하나다. '알 수 없음', '모름', '판단 불가', '답 없음' 같은 말은 쓰지 않는다.",
+    "  잘리거나 흐린 부분은 보이는 정보(남은 그림, 문제 글, 흔한 출제 방식)로 가장 그럴듯하게 짐작해 답한다.",
+]))
 
 KEYS = ("SEEN", "VISIBLE", "THINK", "ANSWER", "REASON")
 _KEY_LINE = re.compile(r"^[\s*#>_`-]*(SEEN|VISIBLE|THINK|ANSWER|REASON)[\s*_`]*[:：][\s*_`]*(.*)$", re.IGNORECASE)
@@ -144,17 +153,18 @@ def elapsed_ms(started):
 
 
 def solve(model, text, image, count, trace, *, choices=None, question=None, submit=None, started=None,
-          gate_visible=False, eval_tag=None):
+          gate_visible=False, eval_tag=None, guess=False):
     """한 문제를 풀고(필요하면 제출까지) {"result", "notes", "timing", "seen", "think", "submission",
     "visible", "retake"} 을 돌려준다.
 
     submit(answer_part, reason) 은 제출 함수(없으면 제출하지 않는다). 객관식은 번호를 못 읽어도 반드시 답을 만든다.
     gate_visible=True(하드모드 사진, allow_guess 아님)면 VISIBLE: no 에서 멈추고 제출하지 않는다(result 는 retake).
+    guess=True(allow_guess)면 그림을 GUESS_SYSTEM 으로 풀고, 단답이 '알 수 없음' 같은 말이면 답만 한 번 더 묻는다.
     eval_tag 는 Langfuse metadata 의 eval 로 남긴다(측정 구분용). 단답을 끝내 못 만들면 QuizError(502).
     """
     started = started or time.perf_counter()
     timing, notes = {}, []
-    system = IMAGE_SYSTEM if image is not None else TEXT_SYSTEM
+    system = (GUESS_SYSTEM if guess else IMAGE_SYSTEM) if image is not None else TEXT_SYSTEM
     limit = QUIZ_MAX_TOKENS_IMAGE if image is not None else QUIZ_MAX_TOKENS_TEXT
     lines = QuizLines()
     error, retake, visible, missing = None, False, None, ""
@@ -212,6 +222,10 @@ def solve(model, text, image, count, trace, *, choices=None, question=None, subm
         if not answer:
             log("ERROR", "퀴즈 풀기 실패", mode=trace["mode"], error=type(error).__name__ if error else "NoAnswer")
             raise quiz.QuizError(502, "문제를 풀지 못했어요. 잠시 뒤 다시 보내 주세요.")
+        if guess and quiz.is_unknown(answer):
+            # allow_guess 인데 '알 수 없음' 같은 말을 썼다 → 가장 그럴듯한 답만 한 번 더 묻는다
+            notes_part, answer, reason = _retry_guess(model, text, image, trace, answer, reason)
+            notes += notes_part
         # 하드모드는 문제 글이 없으므로, 모델이 SEEN 에 옮겨 적은 화면 글에서 '숫자만' 같은 형식 지시를 찾는다
         text_answer, short_notes = quiz.short_answer(answer, question or lines.text("SEEN"))
         result = {"text": text_answer, "reason": reason}
@@ -267,6 +281,24 @@ def _retry_choice(model, text, image, count, trace, reason):
         return ["retry_number"], number, reason or quiz.RETRY_REASON
     log("WARNING", "퀴즈 보기 번호를 못 찾아 1번을 냄", mode=trace["mode"])
     return ["fallback_first"], 1, quiz.FALLBACK_REASON
+
+
+def _retry_guess(model, text, image, trace, answer, reason):
+    """allow_guess 에서 '알 수 없음' 대신 가장 그럴듯한 답만 한 번 더 묻는다. (notes, 답, 근거)"""
+    log("WARNING", "퀴즈 추측 답을 다시 물음", mode=trace["mode"])
+    again = None
+    try:
+        with tracing.observe("quiz-retry-guess", "generation", model=model.model, input=trace,
+                             metadata={"mode": trace["mode"], "type": trace["type"]}):
+            again = model.complete_vision_json(quiz.GUESS_RETRY_SYSTEM, text + "\n가장 그럴듯한 답 하나만 쓴다.", image,
+                                               QUIZ_MAX_TOKENS, trace)
+    except Exception as exc:
+        log("WARNING", "퀴즈 추측 답 다시 묻기 실패", error=type(exc).__name__)
+    guessed = str(again.get("answer") or "").strip() if isinstance(again, dict) else ""
+    if guessed and not quiz.is_unknown(guessed):
+        return ["retry_guess"], guessed, str(again.get("reason") or "") or reason
+    log("WARNING", "퀴즈 추측 답을 끝내 못 받음", mode=trace["mode"])
+    return ["unknown_answer"], answer, reason
 
 
 def _finish(result, notes, timing, seen, think, submit, started):
