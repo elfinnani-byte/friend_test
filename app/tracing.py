@@ -36,11 +36,17 @@ from app.logs import log
 # 원문이 들어가는 속성. 이 속성의 문자열에서만 개인정보 패턴을 찾는다(ID, 시각 같은 다른 속성은 건드리지 않는다).
 MASKED_PREFIXES = ("langfuse.observation.input", "langfuse.observation.output", "langfuse.observation.metadata.",
                    "langfuse.trace.metadata.", "gen_ai.")
+# 숫자 묶음 사이 구분자: 공백, 하이픈(앞뒤 공백 허용), 점, 전각 하이픈·대시. '010 - 1234 - 5678', '010－1234－5678'
+_SEP = r"(?:\s{0,2}[-.\uFF0D\u2010\u2011\u2012\u2013\u2014]\s{0,2}|\s{1,2})?"
 PII_PATTERNS = [
     (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "[이메일]"),
-    (re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"), "[카드번호]"),  # 13~19자리, 공백·하이픈 허용
-    (re.compile(r"(?<!\d)(?:\+82[ -]?|0)(?:1[016789]|2|[3-6]\d|70)[ .-]?\d{3,4}[ .-]?\d{4}(?!\d)"), "[전화번호]"),
+    (re.compile(r"(?<!\d)(?:\d" + _SEP + r"){12,18}\d(?!\d)"), "[카드번호]"),  # 13~19자리
+    # 휴대폰·지역번호. 지역번호 뒤 ')' 도 허용('02)1234-5678')
+    (re.compile(r"(?<!\d)(?:\+82" + _SEP + r"|0)(?:1[016789]|2|[3-6]\d|70)\)?" + _SEP + r"\d{3,4}" + _SEP +
+                r"\d{4}(?!\d)"), "[전화번호]"),
 ]
+# 사용자·모델 원문이 들어가는 속성. 값이 숫자 하나로 읽혀도(카드 번호만 보낸 메시지) 가린다
+TEXT_PREFIXES = ("langfuse.observation.input", "langfuse.observation.output", "gen_ai.")
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -68,13 +74,16 @@ def mask_data(data):
     return data
 
 
-def mask_value(value):
+def mask_value(value, text=True):
     """속성 값 하나를 가린다. 메시지 목록 같은 값은 JSON 문자열로 들어오고 한글이 \\uXXXX 로 바뀌어 있어서,
     그대로 정규식에 넣으면 이스케이프의 숫자와 전화번호가 이어져 카드 번호로 잡히고 JSON이 깨진다.
-    그래서 JSON이면 풀어서 안의 문자열만 가린 뒤 다시 묶는다."""
+    그래서 JSON이면 풀어서 안의 문자열만 가린 뒤 다시 묶는다.
+    text=True(입력·출력 원문)면 값이 숫자 하나로 읽혀도('4111111111111111') 원문을 가린다."""
     try:
         data = json.loads(value)
     except ValueError:
+        return mask_text(value)
+    if text and not isinstance(data, (dict, list, str)):
         return mask_text(value)
     masked = mask_data(data)
     return value if masked == data else json.dumps(masked, ensure_ascii=False)
@@ -87,7 +96,7 @@ def mask_pii(*, params):
         changed = {}
         for key, value in span.attributes.items():
             if isinstance(value, str) and key.startswith(MASKED_PREFIXES):
-                masked = mask_value(value)
+                masked = mask_value(value, text=key.startswith(TEXT_PREFIXES))
                 if masked != value:
                     changed[key] = masked
         if changed:
